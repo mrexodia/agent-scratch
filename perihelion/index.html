@@ -1,0 +1,680 @@
+<title>Perihelion</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;800;900&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root {
+    color-scheme: dark;
+    --void: #070a1c;
+    --panel: rgba(12, 16, 40, 0.88);
+    --line: rgba(150, 162, 230, 0.2);
+    --text: #dfe2f7;
+    --muted: #8a91bf;
+    --comet: #ffb14e;
+    --worm: #7ef0d8;
+    --hazard: #ff5a3c;
+    --display: "Big Shoulders Display", "Arial Narrow", Impact, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  }
+  html, body { height: 100%; }
+  body {
+    background: var(--void);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    overflow: hidden;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  canvas#sky {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    display: block; touch-action: none; cursor: crosshair;
+  }
+  .hud {
+    position: fixed; top: 0; left: 0; right: 0;
+    padding: calc(env(safe-area-inset-top, 0px) + 14px) 16px 0;
+    display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px 20px;
+    pointer-events: none;
+  }
+  .id { display: flex; flex-direction: column; gap: 2px; margin-right: auto; }
+  .mark {
+    font-family: var(--display); font-weight: 900; font-size: 26px;
+    letter-spacing: 0.14em; line-height: 1; color: var(--text);
+  }
+  .mark b { color: var(--comet); font-weight: 900; }
+  .hole-name { color: var(--muted); font-size: 12px; letter-spacing: 0.04em; }
+  .stats { display: flex; gap: 18px; }
+  .stat { display: flex; flex-direction: column; gap: 1px; min-width: 38px; }
+  .stat .k { font-size: 10px; text-transform: uppercase; letter-spacing: 0.16em; color: var(--muted); }
+  .stat .v {
+    font-family: var(--display); font-weight: 800; font-size: 26px; line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat .v.under { color: var(--worm); }
+  .stat .v.over { color: var(--comet); }
+  .ctrls { display: flex; gap: 8px; pointer-events: auto; }
+  button {
+    font: 500 12px/1 var(--mono); color: var(--text);
+    background: rgba(20, 26, 60, 0.7); border: 1px solid var(--line);
+    padding: 9px 12px; border-radius: 3px; cursor: pointer;
+    letter-spacing: 0.03em;
+  }
+  button:hover { border-color: rgba(150, 162, 230, 0.5); }
+  button:focus-visible { outline: 2px solid var(--worm); outline-offset: 2px; }
+  button.primary {
+    background: var(--comet); color: #1a1004; border-color: var(--comet);
+    font-weight: 600; padding: 12px 18px; font-size: 13px;
+  }
+  button.primary:hover { filter: brightness(1.08); }
+  .hint {
+    position: fixed; left: 16px; right: 16px;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
+    margin: 0; text-align: center; color: var(--muted); font-size: 12px;
+    pointer-events: none; transition: opacity 0.6s;
+  }
+  .hint kbd {
+    font: inherit; color: var(--text); border: 1px solid var(--line);
+    border-radius: 3px; padding: 1px 5px;
+  }
+  .toast {
+    position: fixed; left: 50%; top: 42%; transform: translate(-50%, -50%);
+    font-family: var(--display); font-weight: 800; font-size: 22px;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--hazard);
+    pointer-events: none; opacity: 0; transition: opacity 0.25s;
+    text-align: center; width: max-content; max-width: calc(100% - 32px);
+    text-shadow: 0 0 18px rgba(7, 10, 28, 0.9);
+  }
+  .toast.show { opacity: 1; }
+  .toast.info { color: var(--text); }
+  .card-wrap {
+    position: fixed; inset: 0; display: grid; place-items: center;
+    padding-inline: 16px; background: rgba(5, 7, 20, 0.45);
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    padding: 26px 26px 22px; width: min(420px, 100%);
+    display: flex; flex-direction: column; gap: 14px;
+    border-radius: 4px; max-height: calc(100% - 32px); overflow: auto;
+  }
+  .card .eyebrow { font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted); }
+  .card h2 {
+    margin: 0; font-family: var(--display); font-weight: 900;
+    font-size: 58px; line-height: 0.9; letter-spacing: 0.02em;
+    text-transform: uppercase; text-wrap: balance;
+  }
+  .card h2.good { color: var(--worm); }
+  .card h2.even { color: var(--text); }
+  .card h2.bad { color: var(--comet); }
+  .card p { margin: 0; color: var(--muted); line-height: 1.55; }
+  .card .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .card table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  .card th, .card td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); }
+  .card th { font-weight: 500; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+  .card td.n, .card th.n { text-align: right; }
+  .card tfoot td { border-bottom: 0; font-weight: 600; color: var(--text); padding-top: 10px; }
+  .card td .d { color: var(--muted); font-size: 11px; margin-left: 6px; }
+  .card td .d.under { color: var(--worm); }
+  .card td .d.over { color: var(--comet); }
+  @media (max-width: 520px) {
+    .mark { font-size: 21px; }
+    .stat .v { font-size: 21px; }
+    .stats { gap: 14px; }
+    .card h2 { font-size: 46px; }
+  }
+</style>
+
+<canvas id="sky" aria-label="Gravity golf course"></canvas>
+
+<header class="hud">
+  <div class="id">
+    <span class="mark">PERI<b>·</b>HELION</span>
+    <span class="hole-name" id="holeName">Hole 1 · First Light</span>
+  </div>
+  <div class="stats">
+    <div class="stat"><span class="k">Par</span><span class="v" id="par">2</span></div>
+    <div class="stat"><span class="k">Stroke</span><span class="v" id="strokes">0</span></div>
+    <div class="stat"><span class="k">Card</span><span class="v" id="card">E</span></div>
+  </div>
+  <div class="ctrls">
+    <button id="retee" type="button" title="Restart this hole (R)">Re-tee</button>
+    <button id="mute" type="button">Sound on</button>
+  </div>
+</header>
+
+<p class="hint" id="hint">Drag anywhere to pull back, release to launch. The dotted arc shows your first second of flight.</p>
+<div class="toast" id="toast"></div>
+<div class="card-wrap" id="cardWrap" hidden><div class="card" id="cardBox" role="dialog" aria-live="polite"></div></div>
+
+<script id="physics">
+// ---- Course + physics (pure; no DOM) ----
+const W = 1000, H = 625;
+const SURFACE_G = 300;        // px/s² at the surface of a density-1 body
+const BALL_R = 5;
+const HOLE_R = 15;
+const HOLE_GM = 6e4, HOLE_PULL_R = 110;
+const VMAX = 620, MAXPULL = 170;
+const DT = 1 / 240;
+const RESTITUTION = 0.45, FRICTION = 0.82, REST_SPEED = 45;
+const FLIGHT_LIMIT = 18;
+const TAU = Math.PI * 2;
+
+const LEVELS = [
+  { name: "First Light", par: 2, hole: [860, 150], tee: { b: 0, a: -0.8 },
+    bodies: [ { x: 150, y: 470, r: 42, c: 0 }, { x: 520, y: 290, r: 78, c: 1 } ] },
+  { name: "Around the Bend", par: 2, hole: [890, 312], tee: { b: 0, a: -1.2 },
+    bodies: [ { x: 110, y: 312, r: 40, c: 3 }, { x: 500, y: 312, r: 125, c: 2 } ] },
+  { name: "Moon Run", par: 3, hole: [870, 130], tee: { b: 0, a: -0.9 },
+    bodies: [ { x: 130, y: 500, r: 40, c: 0 }, { x: 520, y: 330, r: 70, c: 3 },
+              { r: 22, c: 4, orbit: { p: 1, d: 175, T: 10, ph: 0 } } ] },
+  { name: "Sun Trap", par: 3, hole: [880, 510], tee: { b: 1, a: 0.3 },
+    bodies: [ { x: 500, y: 312, r: 60, type: "star", dens: 1.8 }, { x: 120, y: 120, r: 34, c: 1 },
+              { x: 290, y: 500, r: 30, c: 2 }, { x: 730, y: 130, r: 34, c: 3 } ] },
+  { name: "Binary", par: 2, hole: [500, 312], tee: { b: 2, a: -0.9 },
+    bodies: [ { x: 390, y: 200, r: 62, c: 1 }, { x: 610, y: 425, r: 62, c: 3 }, { x: 110, y: 540, r: 38, c: 0 } ] },
+  { name: "Moon Gate", par: 3, hole: [720, 200], tee: { b: 0, a: -0.7 },
+    bodies: [ { x: 120, y: 470, r: 40, c: 2 }, { x: 720, y: 320, r: 52, c: 0, dens: 1.3 },
+              { r: 20, c: 4, orbit: { p: 1, d: 160, T: 7, ph: 0 } },
+              { r: 20, c: 1, orbit: { p: 1, d: 160, T: 7, ph: Math.PI } } ] },
+  { name: "The Belt", par: 3, hole: [890, 312], tee: { b: 0, a: -0.6 },
+    bodies: [ { x: 110, y: 312, r: 40, c: 3 }, { x: 740, y: 490, r: 44, c: 1 },
+              { x: 490, y: 30, r: 22, c: 5 }, { x: 530, y: 95, r: 18, c: 5 }, { x: 480, y: 160, r: 24, c: 5 },
+              { x: 540, y: 225, r: 16, c: 5 }, { x: 500, y: 290, r: 20, c: 5 }, { x: 470, y: 380, r: 22, c: 5 },
+              { x: 535, y: 440, r: 18, c: 5 }, { x: 490, y: 510, r: 24, c: 5 }, { x: 545, y: 580, r: 20, c: 5 } ] },
+  { name: "Perihelion", par: 4, hole: [500, 50], tee: { b: 1, a: -Math.PI / 2 },
+    bodies: [ { x: 500, y: 312, r: 52, type: "star", dens: 2.2 }, { x: 500, y: 590, r: 28, c: 0 },
+              { r: 28, c: 2, orbit: { p: 0, d: 190, T: 16, ph: 0 } },
+              { x: 160, y: 150, r: 30, c: 4 }, { x: 840, y: 150, r: 30, c: 1 } ] },
+];
+
+for (const L of LEVELS) for (const b of L.bodies) b.gm = b.r * b.r * SURFACE_G * (b.dens || 1);
+
+function bodyAt(L, i, t, out) {
+  const b = L.bodies[i];
+  if (!b.orbit) { out.x = b.x; out.y = b.y; out.vx = 0; out.vy = 0; return out; }
+  const p = L.bodies[b.orbit.p], w = TAU / b.orbit.T, a = b.orbit.ph + w * t, d = b.orbit.d;
+  out.x = p.x + d * Math.cos(a); out.y = p.y + d * Math.sin(a);
+  out.vx = -d * w * Math.sin(a); out.vy = d * w * Math.cos(a);
+  return out;
+}
+
+const _p = { x: 0, y: 0, vx: 0, vy: 0 };
+// Advances ball state s by dt starting at time t. Returns an event or null.
+function step(L, s, t, dt) {
+  let ax = 0, ay = 0;
+  for (let i = 0; i < L.bodies.length; i++) {
+    const b = L.bodies[i]; bodyAt(L, i, t, _p);
+    const dx = _p.x - s.x, dy = _p.y - s.y, d2 = dx * dx + dy * dy, d = Math.sqrt(d2);
+    const a = b.gm / Math.max(d2, b.r * b.r);
+    ax += a * dx / d; ay += a * dy / d;
+  }
+  const hx = L.hole[0] - s.x, hy = L.hole[1] - s.y, hd2 = hx * hx + hy * hy;
+  if (hd2 < HOLE_PULL_R * HOLE_PULL_R) {
+    const hd = Math.sqrt(hd2) || 1, a = HOLE_GM / (hd2 + 400);
+    ax += a * hx / hd; ay += a * hy / hd;
+  }
+  s.vx += ax * dt; s.vy += ay * dt;
+  s.x += s.vx * dt; s.y += s.vy * dt;
+
+  const qx = L.hole[0] - s.x, qy = L.hole[1] - s.y;
+  if (qx * qx + qy * qy < HOLE_R * HOLE_R) return { type: "sink" };
+
+  for (let i = 0; i < L.bodies.length; i++) {
+    const b = L.bodies[i]; bodyAt(L, i, t + dt, _p);
+    const dx = s.x - _p.x, dy = s.y - _p.y, d = Math.hypot(dx, dy), min = b.r + BALL_R;
+    if (d >= min) continue;
+    if (b.type === "star") return { type: "burn", b: i };
+    const nx = dx / d, ny = dy / d;
+    s.x = _p.x + nx * min; s.y = _p.y + ny * min;
+    let rvx = s.vx - _p.vx, rvy = s.vy - _p.vy;
+    const vn = rvx * nx + rvy * ny;
+    const impact = Math.abs(vn);
+    if (vn < 0) {
+      const tx = rvx - vn * nx, ty = rvy - vn * ny;
+      rvx = tx * FRICTION - RESTITUTION * vn * nx;
+      rvy = ty * FRICTION - RESTITUTION * vn * ny;
+    }
+    s.vx = rvx + _p.vx; s.vy = rvy + _p.vy;
+    const rest = Math.hypot(rvx, rvy) < REST_SPEED;
+    return { type: "hit", b: i, impact, rest, a: Math.atan2(ny, nx) };
+  }
+  if (s.x < -250 || s.x > W + 250 || s.y < -250 || s.y > H + 250) return { type: "lost" };
+  return null;
+}
+
+function restPos(L, rest, t, out) {
+  bodyAt(L, rest.b, t, out);
+  const d = L.bodies[rest.b].r + BALL_R;
+  out.x += Math.cos(rest.a) * d; out.y += Math.sin(rest.a) * d;
+  return out;
+}
+
+// Launch state from a resting ball and a pull vector (world units). Null if aimed into the ground.
+function launchState(L, rest, t, pullX, pullY) {
+  const len = Math.hypot(pullX, pullY);
+  if (len < 10) return null;
+  const k = Math.min(len, MAXPULL) / MAXPULL * VMAX / len;
+  const vx = pullX * k, vy = pullY * k;
+  const nx = Math.cos(rest.a), ny = Math.sin(rest.a);
+  if ((vx * nx + vy * ny) / Math.hypot(vx, vy) < -0.15) return { blocked: true };
+  const p = restPos(L, rest, t, { x: 0, y: 0, vx: 0, vy: 0 });
+  return { x: p.x + nx * 0.5, y: p.y + ny * 0.5, vx: vx + p.vx, vy: vy + p.vy };
+}
+</script>
+
+<script>
+(() => {
+  const PAL = [
+    ["#9fb0ff", "#4f5d9c", "#171c45"],
+    ["#f4a6bd", "#b0617c", "#3f1a2c"],
+    ["#f3cd8a", "#b98b4a", "#44290f"],
+    ["#93e3d6", "#3f8f8f", "#0f3131"],
+    ["#d2c3ff", "#8a73c7", "#281d4c"],
+    ["#b8b2a8", "#6e685f", "#26231f"],
+  ];
+  const TERMS = { "-3": "Albatross", "-2": "Eagle", "-1": "Birdie", "0": "Par", "1": "Bogey", "2": "Double bogey", "3": "Triple bogey" };
+  const PICKUP = 10;
+  const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  const $ = (id) => document.getElementById(id);
+  const cv = $("sky"), ctx = cv.getContext("2d");
+  const ui = { holeName: $("holeName"), par: $("par"), strokes: $("strokes"), card: $("card"),
+               hint: $("hint"), toast: $("toast"), wrap: $("cardWrap"), box: $("cardBox"),
+               retee: $("retee"), mute: $("mute") };
+
+  let dpr = 1, vw = 0, vh = 0, scale = 1, ox = 0, oy = 0, starCanvas = null;
+  let level = 0, L = LEVELS[0], scores = [];
+  let simT = 0, flyT = 0, strokes = 0;
+  let state = "aim";              // aim | fly | sunk | card
+  let ball = { x: 0, y: 0, vx: 0, vy: 0 }, rest = null, lastRest = null;
+  let trail = [], particles = [];
+  let drag = null;                // { sx, sy, cx, cy }
+  let shotsTaken = 0;
+
+  // ---------- Sound ----------
+  let audio = null, muted = false;
+  try { muted = localStorage.getItem("perihelion-muted") === "1"; } catch (e) {}
+  function ensureAudio() {
+    if (audio || muted) return;
+    try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  }
+  function tone(f0, f1, dur, type = "sine", vol = 0.12, delay = 0) {
+    if (!audio || muted) return;
+    const t = audio.currentTime + delay, o = audio.createOscillator(), g = audio.createGain();
+    o.type = type; o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g).connect(audio.destination); o.start(t); o.stop(t + dur + 0.02);
+  }
+  const sfx = {
+    launch: (p) => tone(180, 360 + p * 500, 0.22, "triangle", 0.1),
+    bounce: (v) => tone(90 + v * 0.3, 60, 0.12, "sine", Math.min(0.18, 0.03 + v / 2500)),
+    sink: () => [523, 659, 784, 1047].forEach((f, i) => tone(f, f, 0.3, "triangle", 0.09, i * 0.09)),
+    burn: () => { tone(160, 40, 0.5, "sawtooth", 0.08); tone(90, 30, 0.6, "square", 0.04); },
+    lost: () => tone(420, 110, 0.6, "sine", 0.08),
+  };
+  function syncMute() { ui.mute.textContent = muted ? "Sound off" : "Sound on"; ui.mute.setAttribute("aria-pressed", String(!muted)); }
+  ui.mute.addEventListener("click", () => {
+    muted = !muted; try { localStorage.setItem("perihelion-muted", muted ? "1" : "0"); } catch (e) {}
+    if (!muted) ensureAudio(); syncMute();
+  });
+
+  // ---------- Layout ----------
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    vw = window.innerWidth; vh = window.innerHeight;
+    cv.width = Math.round(vw * dpr); cv.height = Math.round(vh * dpr);
+    const topPad = vw < 520 ? 118 : 78, botPad = 44;
+    const availH = Math.max(200, vh - topPad - botPad);
+    scale = Math.min((vw - 24) / W, availH / H);
+    ox = (vw - W * scale) / 2; oy = topPad + (availH - H * scale) / 2;
+    buildStars();
+  }
+  function rng(seed) { return () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646; }
+  function buildStars() {
+    starCanvas = document.createElement("canvas");
+    starCanvas.width = cv.width; starCanvas.height = cv.height;
+    const c = starCanvas.getContext("2d"), r = rng(7), w = starCanvas.width, h = starCanvas.height;
+    c.fillStyle = "#070a1c"; c.fillRect(0, 0, w, h);
+    const neb = [[0.2, 0.3, "rgba(110,70,180,0.10)"], [0.8, 0.75, "rgba(40,140,150,0.08)"], [0.6, 0.15, "rgba(180,90,120,0.06)"]];
+    for (const [x, y, col] of neb) {
+      const g = c.createRadialGradient(x * w, y * h, 0, x * w, y * h, Math.max(w, h) * 0.5);
+      g.addColorStop(0, col); g.addColorStop(1, "rgba(0,0,0,0)");
+      c.fillStyle = g; c.fillRect(0, 0, w, h);
+    }
+    const n = Math.round((w * h) / (5200 * dpr * dpr));
+    for (let i = 0; i < n; i++) {
+      const s = r() < 0.92 ? 0.6 : 1.4;
+      c.fillStyle = `rgba(${200 + r() * 55},${200 + r() * 40},255,${0.2 + r() * 0.6})`;
+      c.beginPath(); c.arc(r() * w, r() * h, s * dpr, 0, TAU); c.fill();
+    }
+  }
+
+  // ---------- Game flow ----------
+  function loadLevel(i, keepT) {
+    level = i; L = LEVELS[i];
+    if (!keepT) simT = 0;
+    strokes = 0; shotsTaken = 0; trail = []; particles = []; drag = null;
+    rest = { ...L.tee }; lastRest = { ...rest };
+    state = "aim"; hideCard(); syncHud();
+  }
+  function relTotal() {
+    let d = 0; scores.forEach((s, i) => { if (s != null) d += s - LEVELS[i].par; });
+    return d;
+  }
+  const fmtRel = (d) => d === 0 ? "E" : d > 0 ? "+" + d : "−" + Math.abs(d);
+  function syncHud() {
+    ui.holeName.textContent = `Hole ${level + 1} of ${LEVELS.length} · ${L.name}`;
+    ui.par.textContent = L.par;
+    ui.strokes.textContent = strokes;
+    const d = relTotal(); ui.card.textContent = fmtRel(d);
+    ui.card.className = "v" + (d < 0 ? " under" : d > 0 ? " over" : "");
+  }
+  let toastTimer = 0;
+  function toast(msg, kind = "") {
+    ui.toast.textContent = msg; ui.toast.className = "toast show " + kind;
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => ui.toast.classList.remove("show"), 1700);
+  }
+
+  function launch() {
+    if (!drag || state !== "aim") return;
+    const px = (drag.sx - drag.cx) / scale, py = (drag.sy - drag.cy) / scale;
+    const s = launchState(L, rest, simT, px, py);
+    drag = null;
+    if (!s) return;
+    if (s.blocked) { toast("Aim away from the surface", "info"); return; }
+    ball = s; rest = null; state = "fly"; flyT = 0; trail = [];
+    strokes++; shotsTaken++; syncHud();
+    sfx.launch(Math.min(1, Math.hypot(px, py) / MAXPULL));
+    if (shotsTaken === 1) ui.hint.style.opacity = "0";
+  }
+
+  function penalty(msg) {
+    strokes++; syncHud(); toast(msg);
+    rest = { ...lastRest }; state = "aim"; trail = [];
+    checkPickup();
+  }
+  function checkPickup() {
+    if (strokes >= PICKUP && state === "aim") finishHole(PICKUP, true);
+  }
+  function finishHole(score, pickedUp) {
+    scores[level] = score; syncHud(); state = "card";
+    const d = score - L.par;
+    const last = level === LEVELS.length - 1;
+    const term = pickedUp ? "Picked up" : score === 1 ? "Hole in one" : (TERMS[d] || `+${d}`);
+    const cls = pickedUp || d > 0 ? "bad" : d < 0 || score === 1 ? "good" : "even";
+    showCard(`
+      <span class="eyebrow">Hole ${level + 1} · ${L.name}</span>
+      <h2 class="${cls}">${term}</h2>
+      <p>${score} stroke${score === 1 ? "" : "s"} on a par ${L.par}. Your card stands at ${fmtRel(relTotal())}.</p>
+      <div class="row"><button class="primary" id="nextBtn" type="button">${last ? "See scorecard" : "Next hole"}</button>
+      <button id="againBtn" type="button">Replay hole</button></div>`);
+    $("nextBtn").onclick = () => last ? showFinal() : loadLevel(level + 1);
+    $("againBtn").onclick = () => { scores[level] = undefined; loadLevel(level); };
+    $("nextBtn").focus();
+  }
+  function showFinal() {
+    state = "card";
+    const total = scores.reduce((a, b) => a + (b || 0), 0), par = LEVELS.reduce((a, l) => a + l.par, 0);
+    let best = null;
+    try { best = parseInt(localStorage.getItem("perihelion-best"), 10); } catch (e) {}
+    const isBest = !(best > 0) || total < best;
+    if (isBest) { try { localStorage.setItem("perihelion-best", String(total)); } catch (e) {} }
+    const rows = LEVELS.map((l, i) => {
+      const s = scores[i], d = s - l.par;
+      const dc = d < 0 ? "under" : d > 0 ? "over" : "";
+      return `<tr><td>${i + 1}</td><td>${l.name}</td><td class="n">${l.par}</td><td class="n">${s}<span class="d ${dc}">${fmtRel(d)}</span></td></tr>`;
+    }).join("");
+    const d = total - par;
+    showCard(`
+      <span class="eyebrow">Final scorecard</span>
+      <h2 class="${d < 0 ? "good" : d > 0 ? "bad" : "even"}">${fmtRel(d)}</h2>
+      <p>${total} strokes against a par of ${par}. ${isBest ? "That is your best round on this device." : `Your best is ${best}.`}</p>
+      <table><thead><tr><th>#</th><th>Hole</th><th class="n">Par</th><th class="n">Score</th></tr></thead>
+      <tbody>${rows}</tbody><tfoot><tr><td></td><td>Total</td><td class="n">${par}</td><td class="n">${total}</td></tr></tfoot></table>
+      <div class="row"><button class="primary" id="restartBtn" type="button">Play another round</button></div>`);
+    $("restartBtn").onclick = () => { scores = []; loadLevel(0); };
+    $("restartBtn").focus();
+  }
+  function showCard(html) { ui.box.innerHTML = html; ui.wrap.hidden = false; }
+  function hideCard() { ui.wrap.hidden = true; }
+
+  ui.retee.addEventListener("click", () => { if (state !== "card") loadLevel(level, true); ui.retee.blur(); });
+  addEventListener("keydown", (e) => {
+    if (e.key === "r" || e.key === "R") { if (state !== "card") loadLevel(level, true); }
+    if (e.key === "Escape") drag = null;
+  });
+
+  // ---------- Input ----------
+  cv.addEventListener("pointerdown", (e) => {
+    ensureAudio(); if (audio && audio.state === "suspended") audio.resume();
+    if (state !== "aim") return;
+    cv.setPointerCapture(e.pointerId);
+    drag = { sx: e.clientX, sy: e.clientY, cx: e.clientX, cy: e.clientY };
+  });
+  cv.addEventListener("pointermove", (e) => { if (drag) { drag.cx = e.clientX; drag.cy = e.clientY; } });
+  cv.addEventListener("pointerup", launch);
+  cv.addEventListener("pointercancel", () => { drag = null; });
+
+  // ---------- Simulation ----------
+  function burst(x, y, col, n, speed) {
+    if (reduceMotion) n = Math.ceil(n / 3);
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * TAU, v = speed * (0.3 + Math.random());
+      particles.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 0, max: 0.5 + Math.random() * 0.7, col });
+    }
+  }
+  function tick() {
+    if (state === "fly") {
+      const ev = step(L, ball, simT, DT);
+      flyT += DT;
+      if (((flyT * 240) | 0) % 2 === 0) { trail.push(ball.x, ball.y); if (trail.length > 140) trail.splice(0, 2); }
+      if (ev) handle(ev);
+      else if (flyT > FLIGHT_LIMIT) { sfx.lost(); penalty("Lost in orbit · +1"); }
+    }
+    simT += DT;
+    for (const p of particles) { p.life += DT; p.x += p.vx * DT; p.y += p.vy * DT; p.vx *= 0.995; p.vy *= 0.995; }
+    if (particles.length) particles = particles.filter((p) => p.life < p.max);
+  }
+  function handle(ev) {
+    if (ev.type === "sink") {
+      state = "sunk"; sfx.sink();
+      burst(L.hole[0], L.hole[1], "#7ef0d8", 40, 140);
+      const s = strokes; setTimeout(() => finishHole(s, false), 900);
+    } else if (ev.type === "burn") {
+      sfx.burn(); burst(ball.x, ball.y, "#ff5a3c", 50, 180); penalty("Vaporised · +1");
+    } else if (ev.type === "lost") {
+      sfx.lost(); penalty("Lost to the void · +1");
+    } else if (ev.type === "hit") {
+      if (ev.impact > 30) { sfx.bounce(ev.impact); burst(ball.x, ball.y, "#c9c3ff", Math.min(14, ev.impact / 25 | 0), ev.impact * 0.25); }
+      if (ev.rest) { rest = { b: ev.b, a: ev.a }; lastRest = { ...rest }; state = "aim"; checkPickup(); }
+    }
+  }
+
+  // ---------- Rendering ----------
+  const tmp = { x: 0, y: 0, vx: 0, vy: 0 };
+  function drawBody(i) {
+    const b = L.bodies[i], p = bodyAt(L, i, simT, tmp), r = b.r;
+    if (b.type === "star") {
+      const flick = reduceMotion ? 1 : 1 + Math.sin(simT * 7) * 0.03 + Math.sin(simT * 13.3) * 0.02;
+      let g = ctx.createRadialGradient(p.x, p.y, r * 0.5, p.x, p.y, r * 3.4 * flick);
+      g.addColorStop(0, "rgba(255,120,60,0.45)"); g.addColorStop(0.35, "rgba(255,90,60,0.12)"); g.addColorStop(1, "rgba(255,90,60,0)");
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, r * 3.4 * flick, 0, TAU); ctx.fill();
+      g = ctx.createRadialGradient(p.x - r * 0.2, p.y - r * 0.2, 0, p.x, p.y, r);
+      g.addColorStop(0, "#fff6e0"); g.addColorStop(0.45, "#ffd27a"); g.addColorStop(1, "#ff6a3c");
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, TAU); ctx.fill();
+      return;
+    }
+    const [hi, mid, lo] = PAL[b.c];
+    let g = ctx.createRadialGradient(p.x, p.y, r * 0.9, p.x, p.y, r * 1.35);
+    g.addColorStop(0, hexA(mid, 0.28)); g.addColorStop(1, hexA(mid, 0));
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, r * 1.35, 0, TAU); ctx.fill();
+    g = ctx.createRadialGradient(p.x - r * 0.4, p.y - r * 0.45, r * 0.05, p.x, p.y, r * 1.05);
+    g.addColorStop(0, hi); g.addColorStop(0.55, mid); g.addColorStop(1, lo);
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, TAU); ctx.fill();
+    ctx.save(); ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, TAU); ctx.clip();
+    ctx.translate(p.x, p.y); ctx.rotate(-0.35 + i * 0.4);
+    if (b.c === 5) {
+      ctx.fillStyle = "rgba(20,18,15,0.35)";
+      for (let k = 0; k < 3; k++) { const a = i * 2.1 + k * 2.3; ctx.beginPath(); ctx.arc(Math.cos(a) * r * 0.45, Math.sin(a) * r * 0.45, r * 0.22, 0, TAU); ctx.fill(); }
+    } else {
+      ctx.fillStyle = hexA(hi, 0.14);
+      for (let k = -2; k <= 2; k++) ctx.fillRect(-r, k * r * 0.36 - r * 0.08, r * 2, r * (0.1 + (k & 1) * 0.08));
+    }
+    ctx.restore();
+    g = ctx.createRadialGradient(p.x - r * 0.5, p.y - r * 0.5, r * 0.6, p.x - r * 0.2, p.y - r * 0.2, r * 1.6);
+    g.addColorStop(0, "rgba(5,6,20,0)"); g.addColorStop(1, "rgba(5,6,20,0.65)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, TAU); ctx.fill();
+  }
+  function hexA(hex, a) {
+    const n = parseInt(hex.slice(1), 16);
+    return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`;
+  }
+  function drawField() {
+    ctx.save(); ctx.setLineDash([2, 7]); ctx.lineWidth = 1 / scale;
+    for (let i = 0; i < L.bodies.length; i++) {
+      const b = L.bodies[i]; if (b.orbit || b.r < 30) continue;
+      for (const a of [120, 60, 30]) {
+        const rr = Math.sqrt(b.gm / a); if (rr < b.r + 10) continue;
+        ctx.strokeStyle = b.type === "star" ? "rgba(255,120,90,0.13)" : "rgba(170,180,240,0.09)";
+        ctx.beginPath(); ctx.arc(b.x, b.y, rr, 0, TAU); ctx.stroke();
+      }
+    }
+    for (const b of L.bodies) {
+      if (!b.orbit) continue; const p = L.bodies[b.orbit.p];
+      ctx.strokeStyle = "rgba(170,180,240,0.12)"; ctx.beginPath(); ctx.arc(p.x, p.y, b.orbit.d, 0, TAU); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  function drawHole() {
+    const [x, y] = L.hole, t = reduceMotion ? 0 : simT;
+    let g = ctx.createRadialGradient(x, y, 4, x, y, 46);
+    g.addColorStop(0, "rgba(126,240,216,0.25)"); g.addColorStop(1, "rgba(126,240,216,0)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, 46, 0, TAU); ctx.fill();
+    ctx.fillStyle = "#03040d"; ctx.beginPath(); ctx.arc(x, y, HOLE_R - 2, 0, TAU); ctx.fill();
+    ctx.lineCap = "round";
+    [[HOLE_R + 9, 1.1, 0.35], [HOLE_R + 4, -1.7, 0.7], [HOLE_R - 1, 2.6, 1]].forEach(([r, sp, al], k) => {
+      ctx.strokeStyle = `rgba(126,240,216,${al})`; ctx.lineWidth = 1.6;
+      for (let j = 0; j < 3; j++) {
+        const a0 = t * sp + j * TAU / 3 + k;
+        ctx.beginPath(); ctx.arc(x, y, r, a0, a0 + 1.3); ctx.stroke();
+      }
+    });
+    // flag
+    ctx.strokeStyle = "rgba(223,226,247,0.7)"; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(x + 24, y + 2); ctx.lineTo(x + 24, y - 40); ctx.stroke();
+    const wave = reduceMotion ? 0 : Math.sin(simT * 3) * 2;
+    ctx.fillStyle = "#ffb14e"; ctx.beginPath();
+    ctx.moveTo(x + 24, y - 40); ctx.lineTo(x + 44, y - 34 + wave); ctx.lineTo(x + 24, y - 27); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#1a1004"; ctx.font = `700 9px ${getComputedStyle(document.body).getPropertyValue("--mono")}`;
+    ctx.fillText(String(level + 1), x + 27, y - 30.5);
+  }
+  function drawBall(x, y) {
+    const g = ctx.createRadialGradient(x, y, 0, x, y, 16);
+    g.addColorStop(0, "rgba(255,177,78,0.55)"); g.addColorStop(1, "rgba(255,177,78,0)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, 16, 0, TAU); ctx.fill();
+    ctx.fillStyle = "#fff1d6"; ctx.beginPath(); ctx.arc(x, y, BALL_R, 0, TAU); ctx.fill();
+    ctx.strokeStyle = "#ffb14e"; ctx.lineWidth = 1.5; ctx.stroke();
+  }
+  function drawTrail() {
+    const n = trail.length / 2; if (n < 2) return;
+    ctx.lineCap = "round";
+    for (let i = 1; i < n; i++) {
+      const a = i / n;
+      ctx.strokeStyle = `rgba(255,177,78,${a * 0.55})`; ctx.lineWidth = 1 + a * 3;
+      ctx.beginPath(); ctx.moveTo(trail[i * 2 - 2], trail[i * 2 - 1]); ctx.lineTo(trail[i * 2], trail[i * 2 + 1]); ctx.stroke();
+    }
+  }
+  function drawAim() {
+    const bp = restPos(L, rest, simT, tmp); const bx = bp.x, by = bp.y;
+    if (!drag) {
+      const pulse = reduceMotion ? 0.5 : 0.5 + 0.5 * Math.sin(simT * 4);
+      ctx.strokeStyle = `rgba(255,177,78,${0.25 + pulse * 0.35})`; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(bx, by, 12 + pulse * 4, 0, TAU); ctx.stroke();
+      return;
+    }
+    const px = (drag.sx - drag.cx) / scale, py = (drag.sy - drag.cy) / scale;
+    const s = launchState(L, rest, simT, px, py);
+    const len = Math.min(Math.hypot(px, py), MAXPULL), pw = len / MAXPULL;
+    // rubber band
+    if (len > 2) {
+      const ux = px / Math.hypot(px, py), uy = py / Math.hypot(px, py);
+      ctx.strokeStyle = "rgba(223,226,247,0.35)"; ctx.setLineDash([3, 4]); ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(bx - ux * len * 0.6, by - uy * len * 0.6); ctx.stroke(); ctx.setLineDash([]);
+    }
+    if (!s) return;
+    if (s.blocked) {
+      ctx.fillStyle = "rgba(255,90,60,0.9)"; ctx.font = `600 12px ${getComputedStyle(document.body).getPropertyValue("--mono")}`;
+      ctx.fillText("into the ground", bx + 14, by - 12); return;
+    }
+    // prediction
+    const sim = { ...s }; let t = simT, ev = null;
+    const steps = Math.round(1.0 / DT);
+    for (let i = 0; i < steps; i++) {
+      ev = step(L, sim, t, DT); t += DT;
+      if (i % 7 === 0) {
+        const a = 1 - i / steps;
+        ctx.fillStyle = `rgba(255,214,160,${0.15 + a * 0.75})`;
+        ctx.beginPath(); ctx.arc(sim.x, sim.y, 1.1 + a * 1.4, 0, TAU); ctx.fill();
+      }
+      if (ev) break;
+    }
+    if (ev) {
+      const col = ev.type === "sink" ? "#7ef0d8" : ev.type === "burn" ? "#ff5a3c" : "#dfe2f7";
+      ctx.strokeStyle = col; ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.moveTo(sim.x - 5, sim.y - 5); ctx.lineTo(sim.x + 5, sim.y + 5);
+      ctx.moveTo(sim.x + 5, sim.y - 5); ctx.lineTo(sim.x - 5, sim.y + 5); ctx.stroke();
+    }
+    // Δv readout
+    const dv = Math.round(pw * VMAX);
+    ctx.fillStyle = "rgba(223,226,247,0.85)"; ctx.font = `500 11px ${getComputedStyle(document.body).getPropertyValue("--mono")}`;
+    ctx.fillText(`Δv ${dv} m/s`, bx + 14, by + 22);
+    ctx.fillStyle = "rgba(223,226,247,0.15)"; ctx.fillRect(bx + 14, by + 27, 60, 3);
+    ctx.fillStyle = pw > 0.97 ? "#ff5a3c" : "#ffb14e"; ctx.fillRect(bx + 14, by + 27, 60 * pw, 3);
+  }
+
+  function render() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(starCanvas, 0, 0);
+    ctx.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * ox, dpr * oy);
+    // course bounds
+    ctx.strokeStyle = "rgba(150,162,230,0.10)"; ctx.lineWidth = 1 / scale; ctx.setLineDash([1, 5]);
+    ctx.strokeRect(0, 0, W, H); ctx.setLineDash([]);
+    drawField();
+    drawHole();
+    for (let i = 0; i < L.bodies.length; i++) drawBody(i);
+    drawTrail();
+    for (const p of particles) {
+      const a = 1 - p.life / p.max;
+      ctx.fillStyle = hexA(p.col, a); ctx.beginPath(); ctx.arc(p.x, p.y, 1.8 * a + 0.4, 0, TAU); ctx.fill();
+    }
+    if (state === "fly") drawBall(ball.x, ball.y);
+    else if (state === "aim" || state === "card") {
+      if (rest) { const p = restPos(L, rest, simT, tmp); drawBall(p.x, p.y); }
+      if (state === "aim") drawAim();
+    }
+  }
+
+  let last = performance.now(), acc = 0;
+  function frame(now) {
+    acc += Math.min(0.05, (now - last) / 1000); last = now;
+    while (acc >= DT) { tick(); acc -= DT; }
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- Boot ----------
+  function start(data) {
+    data = data || {};
+    scores = Array.isArray(data.scores) ? data.scores : [];
+    const lv = Number.isInteger(data.level) && data.level >= 0 && data.level < LEVELS.length ? data.level : 0;
+    resize(); syncMute(); loadLevel(lv);
+    requestAnimationFrame((t) => { last = t; frame(t); });
+  }
+  addEventListener("resize", resize);
+  try { window.claude?.hot?.snapshot?.(() => ({ level, scores })); } catch (e) {}
+  const hot = window.claude?.hot;
+  if (hot?.ready) hot.ready(start); else start(hot?.data ?? {});
+})();
+</script>
