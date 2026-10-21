@@ -9,6 +9,8 @@ set(CMAKE_C_STANDARD 11)
 
 pico_sdk_init()
 
+add_subdirectory(lib/wiggle)
+
 add_executable(mouse_wiggler
     src/main.c
     src/usb_descriptors.c
@@ -22,6 +24,7 @@ target_link_libraries(mouse_wiggler PRIVATE
     pico_rand
     hardware_pio
     tinyusb_device
+    wiggle
 )
 
 # No stdio: the only USB interface is the mouse.

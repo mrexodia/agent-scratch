@@ -28,8 +28,11 @@ use it starts disabled in square mode. While the host is suspended it does
 nothing, so it won't wake a sleeping PC. Holding BOOT while plugging in still
 enters the UF2 bootloader for reflashing.
 
-Timings, sizes, colours and the long-press threshold are `#define`s at the
-top of `src/main.c`.
+The movement generators are a hardware-independent C library in
+`lib/wiggle/`. Their timings and sizes are `#define`s in `lib/wiggle/wiggle.h`.
+LED colours and the long-press threshold are at the top of `src/main.c`.
+`../jiggler-detection-test/` runs the same generator code against a jiggler
+detector.
 
 ## USB identity
 

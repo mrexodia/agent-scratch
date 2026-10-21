@@ -6,14 +6,12 @@
 //
 // Enabled state and mode are saved to flash and restored on power-up.
 //
-// Modes:
-//   MODE_SQUARE    - 2 px square, one step per SQUARE_STEP_MS. Net movement is
-//                    zero, so the computer stays usable while it runs.
-//   MODE_REALISTIC - every few seconds a quick, slightly curved swipe across
-//                    the screen, sometimes with an overshoot and correction.
-//                    Never clicks.
+// Modes (movement generation lives in lib/wiggle):
+//   square    - 2 px square, one step per second. Net movement is zero, so the
+//               computer stays usable while it runs.
+//   realistic - every few seconds a quick, slightly curved swipe across the
+//               screen, sometimes with an overshoot and correction. Never clicks.
 
-#include <math.h>
 #include <string.h>
 
 #include "pico/stdlib.h"
@@ -26,6 +24,7 @@
 #include "tusb.h"
 
 #include "ws2812.pio.h"
+#include "wiggle.h"
 
 #define LED_PIN                 PICO_DEFAULT_WS2812_PIN
 #define LED_BRIGHTNESS          32
@@ -34,44 +33,17 @@
 #define DEBOUNCE_MS             30
 #define LONG_PRESS_MS           700
 
-#define SQUARE_STEP_MS          1000
-#define SQUARE_SIZE             2
-
-// Realistic mode: pause between gestures, and the area (in mouse counts,
-// relative to where the cursor was when the mode started) targets are picked in.
-#define GESTURE_PAUSE_MIN_MS    3000
-#define GESTURE_PAUSE_MAX_MS    25000
-#define GESTURE_BURST_CHANCE    0.25f
-#define AREA_HALF_WIDTH         700
-#define AREA_HALF_HEIGHT        400
-#define MIN_SWIPE               80
-
-typedef enum { MODE_SQUARE, MODE_REALISTIC, MODE_COUNT } wiggle_mode_t;
-
-static const uint8_t mode_colour[MODE_COUNT][3] = {
-    [MODE_SQUARE]    = {0, LED_BRIGHTNESS, 0},  // green
-    [MODE_REALISTIC] = {0, 0, LED_BRIGHTNESS},  // blue
+static const uint8_t mode_colour[WIGGLE_MODE_COUNT][3] = {
+    [WIGGLE_MODE_SQUARE]    = {0, LED_BRIGHTNESS, 0},  // green
+    [WIGGLE_MODE_REALISTIC] = {0, 0, LED_BRIGHTNESS},  // blue
 };
 
 static bool enabled;
-static wiggle_mode_t mode = MODE_SQUARE;
+static wiggle_mode_t mode = WIGGLE_MODE_SQUARE;
+static wiggle_t wiggler;
 
 static inline bool ms_reached(uint32_t now, uint32_t t) {
     return (int32_t)(now - t) >= 0;
-}
-
-// --- Random helpers --------------------------------------------------------
-
-static float frand(void) {
-    return (float)(get_rand_32() >> 8) * (1.0f / 16777216.0f);
-}
-
-static float frange(float lo, float hi) {
-    return lo + (hi - lo) * frand();
-}
-
-static uint32_t urange(uint32_t lo, uint32_t hi) {
-    return lo + get_rand_32() % (hi - lo + 1);
 }
 
 // --- LED ---------------------------------------------------------------------
@@ -102,145 +74,10 @@ static void led_update(uint32_t now) {
 // --- Mouse -------------------------------------------------------------------
 
 static bool mouse_move(int8_t dx, int8_t dy) {
-    if (!tud_hid_ready()) return false;
     uint8_t report[4] = {0, (uint8_t)dx, (uint8_t)dy, 0};
     // In boot protocol the host expects the 3-byte boot mouse report.
     uint16_t len = tud_hid_get_protocol() == HID_PROTOCOL_BOOT ? 3 : 4;
     return tud_hid_report(0, report, len);
-}
-
-// --- Square mode -------------------------------------------------------------
-
-static const int8_t square_steps[4][2] = {{1, 0}, {0, 1}, {-1, 0}, {0, -1}};
-static uint square_idx;
-static uint32_t square_next_ms;
-
-static void square_reset(uint32_t now) {
-    square_idx = 0;
-    square_next_ms = now;
-}
-
-static void square_task(uint32_t now) {
-    if (!ms_reached(now, square_next_ms)) return;
-    if (!mouse_move(square_steps[square_idx][0] * SQUARE_SIZE,
-                    square_steps[square_idx][1] * SQUARE_SIZE)) return;
-    square_idx = (square_idx + 1) % 4;
-    square_next_ms = now + SQUARE_STEP_MS;
-}
-
-// --- Realistic mode ----------------------------------------------------------
-
-// One stroke: a quadratic Bezier from (0,0) via (cx,cy) to (dx,dy), traversed
-// with a minimum-jerk velocity profile (slow start, fast middle, slow end).
-typedef struct {
-    float dx, dy;
-    float cx, cy;
-    uint32_t duration_ms;
-    uint32_t pause_ms;  // wait before this stroke starts
-} stroke_t;
-
-#define MAX_STROKES 3
-static stroke_t strokes[MAX_STROKES];
-static int stroke_count, stroke_idx;
-static uint32_t stroke_start_ms;
-static int32_t stroke_sent_x, stroke_sent_y;
-static int32_t pos_x, pos_y;  // estimated cursor offset from the start point
-static uint32_t gesture_next_ms;
-
-static void add_stroke(float dx, float dy, uint32_t pause_ms) {
-    if (stroke_count >= MAX_STROKES) return;
-    float len = hypotf(dx, dy);
-    if (len < 1.0f) return;
-    float bend = frange(-0.2f, 0.2f) * len;
-    stroke_t *s = &strokes[stroke_count++];
-    s->dx = dx;
-    s->dy = dy;
-    s->cx = dx * 0.5f - dy / len * bend;
-    s->cy = dy * 0.5f + dx / len * bend;
-    s->duration_ms = 80 + (uint32_t)(len * frange(0.3f, 0.6f));
-    if (s->duration_ms > 800) s->duration_ms = 800;
-    s->pause_ms = pause_ms;
-}
-
-static void start_stroke(uint32_t now) {
-    stroke_start_ms = now + strokes[stroke_idx].pause_ms;
-    stroke_sent_x = stroke_sent_y = 0;
-}
-
-static void plan_gesture(uint32_t now) {
-    float dx = 0, dy = 0;
-    for (int tries = 0; tries < 8; tries++) {
-        dx = frange(-AREA_HALF_WIDTH, AREA_HALF_WIDTH) - (float)pos_x;
-        dy = frange(-AREA_HALF_HEIGHT, AREA_HALF_HEIGHT) - (float)pos_y;
-        if (hypotf(dx, dy) >= MIN_SWIPE) break;
-    }
-
-    stroke_count = stroke_idx = 0;
-    if (frand() < 0.3f) {
-        // Overshoot the target, then pull back to it.
-        float k = frange(1.04f, 1.15f);
-        add_stroke(dx * k, dy * k, 0);
-        add_stroke(dx * (1.0f - k) + frange(-4, 4), dy * (1.0f - k) + frange(-4, 4),
-                   urange(60, 250));
-    } else {
-        add_stroke(dx, dy, 0);
-    }
-    if (frand() < 0.4f) {
-        // Small follow-up adjustment.
-        add_stroke(frange(-25, 25), frange(-25, 25), urange(150, 700));
-    }
-    start_stroke(now);
-}
-
-static void realistic_reset(uint32_t now) {
-    stroke_count = stroke_idx = 0;
-    pos_x = pos_y = 0;
-    gesture_next_ms = now + 500;
-}
-
-static void realistic_task(uint32_t now) {
-    if (stroke_idx >= stroke_count) {
-        if (!ms_reached(now, gesture_next_ms)) return;
-        plan_gesture(now);
-        if (stroke_count == 0) return;
-    }
-
-    const stroke_t *s = &strokes[stroke_idx];
-    if (!ms_reached(now, stroke_start_ms) || !tud_hid_ready()) return;
-
-    float t = (float)(now - stroke_start_ms) / (float)s->duration_ms;
-    if (t > 1.0f) t = 1.0f;
-    float e = t * t * t * (10.0f + t * (-15.0f + 6.0f * t));
-    float u = 1.0f - e;
-    float x = 2.0f * u * e * s->cx + e * e * s->dx;
-    float y = 2.0f * u * e * s->cy + e * e * s->dy;
-    if (t < 1.0f) {  // a little hand tremor
-        x += frange(-0.7f, 0.7f);
-        y += frange(-0.7f, 0.7f);
-    }
-
-    int32_t ddx = (int32_t)lroundf(x) - stroke_sent_x;
-    int32_t ddy = (int32_t)lroundf(y) - stroke_sent_y;
-    ddx = ddx > 127 ? 127 : ddx < -127 ? -127 : ddx;
-    ddy = ddy > 127 ? 127 : ddy < -127 ? -127 : ddy;
-
-    if (ddx || ddy) {
-        if (!mouse_move((int8_t)ddx, (int8_t)ddy)) return;
-        stroke_sent_x += ddx;
-        stroke_sent_y += ddy;
-        pos_x += ddx;
-        pos_y += ddy;
-    }
-
-    if (t >= 1.0f && stroke_sent_x == lroundf(s->dx) && stroke_sent_y == lroundf(s->dy)) {
-        if (++stroke_idx < stroke_count) {
-            start_stroke(now);
-        } else if (frand() < GESTURE_BURST_CHANCE) {
-            gesture_next_ms = now + urange(400, 2500);
-        } else {
-            gesture_next_ms = now + urange(GESTURE_PAUSE_MIN_MS, GESTURE_PAUSE_MAX_MS);
-        }
-    }
 }
 
 // --- Saved settings ----------------------------------------------------------
@@ -272,7 +109,7 @@ static const settings_t *settings_slot(int slot) {
 }
 
 static bool settings_valid(const settings_t *s) {
-    return s->magic == SETTINGS_MAGIC && s->mode < MODE_COUNT && s->enabled <= 1 &&
+    return s->magic == SETTINGS_MAGIC && s->mode < WIGGLE_MODE_COUNT && s->enabled <= 1 &&
            s->check == (uint8_t)(s->enabled ^ s->mode ^ 0xA5);
 }
 
@@ -345,8 +182,7 @@ static bool __no_inline_not_in_flash_func(get_bootsel_button)(void) {
 }
 
 static void reset_mode(uint32_t now) {
-    square_reset(now);
-    realistic_reset(now);
+    wiggle_start(&wiggler, mode, now);
 }
 
 static void on_long_press(uint32_t now) {
@@ -357,7 +193,7 @@ static void on_long_press(uint32_t now) {
 }
 
 static void on_short_press(uint32_t now) {
-    mode = (mode + 1) % MODE_COUNT;
+    mode = (mode + 1) % WIGGLE_MODE_COUNT;
     led_flash_until = now + MODE_FLASH_MS;
     reset_mode(now);
     settings_changed(now);
@@ -395,6 +231,7 @@ static void button_task(uint32_t now) {
 
 int main(void) {
     settings_load();
+    wiggle_init(&wiggler, get_rand_32);
     led_init();
     reset_mode(0);
     tusb_init();
@@ -408,8 +245,8 @@ int main(void) {
 
         // Don't move (and so never wake the host) while it is suspended.
         if (enabled && tud_mounted() && !tud_suspended()) {
-            if (mode == MODE_SQUARE) square_task(now);
-            else realistic_task(now);
+            int8_t dx, dy;
+            if (tud_hid_ready() && wiggle_poll(&wiggler, now, &dx, &dy)) mouse_move(dx, dy);
         }
 
         led_update(now);
