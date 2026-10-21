@@ -24,7 +24,8 @@ uint8_t const *tud_descriptor_device_cb(void) {
     return (uint8_t const *)&desc_device;
 }
 
-// 46 bytes: 8 buttons, X, Y, wheel (4-byte reports, no report ID).
+// 46 bytes, as dumped from the real mouse with usbhid-dump: 3 buttons padded
+// to a byte, X, Y, wheel (4-byte reports, no report ID).
 static uint8_t const desc_hid_report[] = {
     0x05, 0x01,  // Usage Page (Generic Desktop)
     0x09, 0x02,  // Usage (Mouse)
@@ -33,7 +34,7 @@ static uint8_t const desc_hid_report[] = {
     0xA1, 0x00,  //   Collection (Physical)
     0x05, 0x09,  //     Usage Page (Button)
     0x19, 0x01,  //     Usage Minimum (1)
-    0x29, 0x08,  //     Usage Maximum (8)
+    0x29, 0x03,  //     Usage Maximum (3)
     0x15, 0x00,  //     Logical Minimum (0)
     0x25, 0x01,  //     Logical Maximum (1)
     0x95, 0x08,  //     Report Count (8)

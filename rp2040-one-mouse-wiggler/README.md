@@ -39,9 +39,8 @@ serial number, bMaxPacketSize0 8, one boot-mouse interface, 100 mA, remote
 wakeup, 4-byte EP 0x81 at bInterval 10, and a 46-byte report descriptor.
 It has no extra CDC/serial interface.
 
-The report descriptor bytes are the known c077 descriptor (8 buttons + X/Y/wheel,
-46 bytes); lsusb printed `UNAVAILABLE`, so they weren't taken from your
-dump. To compare against your own mouse on Linux:
+The 46-byte report descriptor was taken from the real mouse with
+`usbhid-dump`. To compare the wiggler against a mouse on Linux:
 
 ```sh
 sudo usbhid-dump -d 046d:c077 -e descriptor
