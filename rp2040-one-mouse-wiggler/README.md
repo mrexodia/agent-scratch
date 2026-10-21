@@ -1,26 +1,68 @@
 # RP2040-One mouse wiggler
 
-Plug the Waveshare RP2040-One into a USB port and it shows up as a USB mouse.
-Press the **BOOT** button to start wiggling: the onboard RGB LED turns green
-and the pointer moves 4 px right and back every 5 s. Press it again to stop.
+Firmware for the Waveshare RP2040-One that enumerates as a Logitech
+"USB Optical Mouse" (046d:c077) and moves the pointer on its own. It never
+clicks.
 
-## Flashing (Arduino IDE)
+## Controls (onboard BOOT button)
 
-1. Add the board manager URL
-   `https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json`
-   and install **Raspberry Pi Pico/RP2040/RP2350** (arduino-pico).
-2. Library Manager: install **Adafruit NeoPixel**.
-3. Tools > Board > **Waveshare RP2040 One**.
-4. Hold BOOT while plugging in (an `RPI-RP2` drive appears), then Upload.
+| Action | Result |
+| --- | --- |
+| Long press (≥ 0.7 s) | Enable / disable. LED on while enabled. |
+| Short press | Cycle mode. When disabled, the LED briefly flashes the new mode's colour. |
 
-Or with arduino-cli:
+Modes:
+
+- **Square (green):** moves one pixel per second around a 1 px square. The
+  cursor stays put overall, so you can keep using the computer.
+- **Realistic (blue):** every 3–25 s (sometimes in quick bursts) it makes a
+  fast, slightly curved swipe to a random spot. Swipes speed up and slow
+  down like a hand, with small tremor, sometimes overshoot and correct, and
+  sometimes end with a small adjustment. Targets are kept within roughly
+  ±700 × ±400 counts of where the cursor started.
+
+It starts disabled in square mode. While the host is suspended it does
+nothing, so it won't wake a sleeping PC. Holding BOOT while plugging in still
+enters the UF2 bootloader for reflashing.
+
+Timings, sizes, colours and the long-press threshold are `#define`s at the
+top of `src/main.c`.
+
+## USB identity
+
+`src/usb_descriptors.c` reproduces the `lsusb -v` output of the real mouse:
+VID/PID, bcdDevice 72.00, strings "Logitech" / "USB Optical Mouse", no
+serial number, bMaxPacketSize0 8, one boot-mouse interface, 100 mA, remote
+wakeup, 4-byte EP 0x81 at bInterval 10, and a 46-byte report descriptor.
+It has no extra CDC/serial interface.
+
+The report descriptor bytes are the known c077 descriptor (8 buttons + X/Y/wheel,
+46 bytes); lsusb printed `UNAVAILABLE`, so they weren't taken from your
+dump. To compare against your own mouse on Linux:
 
 ```sh
-arduino-cli compile --upload -b rp2040:rp2040:waveshare_rp2040_one rp2040-one-mouse-wiggler
+sudo usbhid-dump -d 046d:c077 -e descriptor
 ```
 
-## Tweaks
+The one difference that can't be removed: the RP2040's USB controller only
+works as a **full-speed** device, so lsusb shows `Full Speed (12Mbps)`
+instead of `Low Speed (1Mbps)`.
 
-Constants at the top of the sketch: `WIGGLE_INTERVAL_MS`, `WIGGLE_PIXELS`,
-LED colour in `setLed()`, and `EXT_BUTTON_PIN` (optional extra push button
-between that GPIO and GND; set to `-1` to disable).
+## Building
+
+Requires the [Pico SDK](https://github.com/raspberrypi/pico-sdk) 2.x (with
+the `lib/tinyusb` submodule) and an `arm-none-eabi` toolchain.
+
+```sh
+export PICO_SDK_PATH=/path/to/pico-sdk
+cmake -S . -B build -G Ninja
+ninja -C build
+```
+
+You can also open this folder with the Raspberry Pi Pico VS Code extension
+("Import Project").
+
+## Flashing
+
+Hold BOOT while plugging the board in. An `RPI-RP2` drive appears; copy
+`build/mouse_wiggler.uf2` onto it.
