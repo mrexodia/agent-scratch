@@ -1,1 +1,3 @@
 build/
+# Undo the repo-wide Python "lib/" ignore: lib/ holds source here.
+!lib/

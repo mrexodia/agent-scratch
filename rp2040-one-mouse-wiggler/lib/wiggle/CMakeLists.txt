@@ -1,0 +1,5 @@
+add_library(wiggle STATIC wiggle.c)
+target_include_directories(wiggle PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+if(NOT MSVC)
+    target_link_libraries(wiggle PUBLIC m)
+endif()
