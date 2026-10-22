@@ -7,10 +7,9 @@
 // Enabled state and mode are saved to flash and restored on power-up.
 //
 // Modes (movement generation lives in lib/wiggle):
-//   square    - 2 px square, one step per second. Net movement is zero, so the
-//               computer stays usable while it runs.
-//   realistic - every few seconds a quick, slightly curved swipe across the
-//               screen, sometimes with an overshoot and correction. Never clicks.
+//   quiet - bounded straight-line drift, one variable-size step per rest.
+//   sweep - short variable-speed straight sweeps, separated by rests.
+// Mode numbers are compatible with old square/realistic settings. Never clicks.
 
 #include <string.h>
 
@@ -34,13 +33,16 @@
 #define LONG_PRESS_MS           700
 
 static const uint8_t mode_colour[WIGGLE_MODE_COUNT][3] = {
-    [WIGGLE_MODE_SQUARE]    = {0, LED_BRIGHTNESS, 0},  // green
-    [WIGGLE_MODE_REALISTIC] = {0, 0, LED_BRIGHTNESS},  // blue
+    [WIGGLE_MODE_QUIET]    = {0, LED_BRIGHTNESS, 0},  // green
+    [WIGGLE_MODE_SWEEP] = {0, 0, LED_BRIGHTNESS},  // blue
 };
 
 static bool enabled;
-static wiggle_mode_t mode = WIGGLE_MODE_SQUARE;
+static wiggle_mode_t mode = WIGGLE_MODE_QUIET;
 static wiggle_t wiggler;
+static bool pending_report;
+static int8_t pending_dx, pending_dy;
+static uint32_t pending_since;
 
 static inline bool ms_reached(uint32_t now, uint32_t t) {
     return (int32_t)(now - t) >= 0;
@@ -182,6 +184,7 @@ static bool __no_inline_not_in_flash_func(get_bootsel_button)(void) {
 }
 
 static void reset_mode(uint32_t now) {
+    pending_report = false;
     wiggle_start(&wiggler, mode, now);
 }
 
@@ -243,10 +246,23 @@ int main(void) {
         button_task(now);
         settings_task(now);
 
-        // Don't move (and so never wake the host) while it is suspended.
-        if (enabled && tud_mounted() && !tud_suspended()) {
-            int8_t dx, dy;
-            if (tud_hid_ready() && wiggle_poll(&wiggler, now, &dx, &dy)) mouse_move(dx, dy);
+        // No wakeup or stale stroke on resume/reconnect. Keep the selected
+        // line through resets so retained host histories remain collinear.
+        static bool was_active;
+        bool active = enabled && tud_mounted() && !tud_suspended();
+        if (active != was_active) reset_mode(now);
+        was_active = active;
+        if (active && tud_hid_ready()) {
+            if (!pending_report) {
+                pending_report = wiggle_poll(&wiggler, now, &pending_dx, &pending_dy);
+                pending_since = now;
+            }
+            if (pending_report && mouse_move(pending_dx, pending_dy)) {
+                // Preserve report order across a rejected USB submission, and
+                // measure the next interval from acceptance, not the old poll.
+                wiggler.next_ms += now - pending_since;
+                pending_report = false;
+            }
         }
 
         led_update(now);

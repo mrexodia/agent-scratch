@@ -1,12 +1,4 @@
-// Mouse movement generators for the wiggler.
-//
-// Plain C99 with no hardware dependencies, so the same code runs on the
-// RP2040 and in host-side tests (see jiggler-detection-test/).
-//
-// Usage: call wiggle_start() when wiggling starts or the mode changes, then
-// call wiggle_poll() whenever the host can accept a mouse report. When it
-// returns true, send a report with the returned dx/dy.
-
+// Hardware-independent movement engine shared by firmware and host tests.
 #ifndef WIGGLE_H
 #define WIGGLE_H
 
@@ -17,81 +9,47 @@
 extern "C" {
 #endif
 
-// Square mode: one step every WIGGLE_SQUARE_STEP_MS around a square of
-// WIGGLE_SQUARE_SIZE counts. Net movement is zero.
-#ifndef WIGGLE_SQUARE_STEP_MS
-#define WIGGLE_SQUARE_STEP_MS        1000
-#endif
-#ifndef WIGGLE_SQUARE_SIZE
-#define WIGGLE_SQUARE_SIZE           2
-#endif
-
-// Realistic mode: pause between gestures, chance of a quick follow-up gesture,
-// and the area (in mouse counts, relative to where the cursor was when the
-// mode started) that targets are picked in.
-#ifndef WIGGLE_GESTURE_PAUSE_MIN_MS
-#define WIGGLE_GESTURE_PAUSE_MIN_MS  3000
-#endif
-#ifndef WIGGLE_GESTURE_PAUSE_MAX_MS
-#define WIGGLE_GESTURE_PAUSE_MAX_MS  25000
-#endif
-#ifndef WIGGLE_GESTURE_BURST_CHANCE
-#define WIGGLE_GESTURE_BURST_CHANCE  0.25f
-#endif
-#ifndef WIGGLE_AREA_HALF_WIDTH
-#define WIGGLE_AREA_HALF_WIDTH       700
-#endif
-#ifndef WIGGLE_AREA_HALF_HEIGHT
-#define WIGGLE_AREA_HALF_HEIGHT      400
-#endif
-#ifndef WIGGLE_MIN_SWIPE
-#define WIGGLE_MIN_SWIPE             80
-#endif
-
+// Persisted mode numbers must not change. The legacy names remain source aliases;
+// mode 0 no longer traces a square, and mode 1 no longer simulates curved swipes.
 typedef enum {
-    WIGGLE_MODE_SQUARE,
-    WIGGLE_MODE_REALISTIC,
-    WIGGLE_MODE_COUNT
+    WIGGLE_MODE_QUIET = 0,
+    WIGGLE_MODE_SWEEP = 1,
+    WIGGLE_MODE_COUNT = 2,
+    WIGGLE_MODE_SQUARE = WIGGLE_MODE_QUIET,
+    WIGGLE_MODE_REALISTIC = WIGGLE_MODE_SWEEP
 } wiggle_mode_t;
 
-#define WIGGLE_MAX_STROKES 3
+#define WIGGLE_QUIET_BOUND 192
+#define WIGGLE_SWEEP_BOUND 400
+#define WIGGLE_MAX_REPORTS 10
+#define WIGGLE_REST_MIN_MS 3200
 
-// One stroke: a quadratic Bezier from (0,0) via (cx,cy) to (dx,dy).
-typedef struct {
-    float dx, dy;
-    float cx, cy;
-    uint32_t duration_ms;
-    uint32_t pause_ms;  // wait before this stroke starts
-} wiggle_stroke_t;
-
+// One fixed, randomly chosen line per wiggle_init (normally once at boot).
+// Coordinates are raw mouse counts, not pixels. Position is bounded relative
+// to each wiggle_start; there is no screen position feedback. Restarts preserve
+// the axis because host histories can retain reports from before the restart.
 typedef struct {
     uint32_t (*rand32)(void);
     wiggle_mode_t mode;
-
-    // Square mode
-    unsigned square_idx;
-    uint32_t square_next_ms;
-
-    // Realistic mode
-    wiggle_stroke_t strokes[WIGGLE_MAX_STROKES];
-    int stroke_count, stroke_idx;
-    uint32_t stroke_start_ms;
-    int32_t stroke_sent_x, stroke_sent_y;
-    int32_t pos_x, pos_y;  // estimated cursor offset from the start point
-    uint32_t gesture_next_ms;
+    int8_t axis_x, axis_y;
+    int16_t position;
+    int8_t reports[WIGGLE_MAX_REPORTS];
+    uint8_t count, index;
+    uint32_t next_ms;
 } wiggle_t;
 
-// rand32 must return uniformly distributed 32-bit random numbers.
+// rand32 must be non-NULL and return uniformly distributed 32-bit random numbers.
 void wiggle_init(wiggle_t *w, uint32_t (*rand32)(void));
 
-// (Re)start generating movement in the given mode.
+// Discard any old run and restart with a fresh bounded origin and initial rest.
 void wiggle_start(wiggle_t *w, wiggle_mode_t mode, uint32_t now_ms);
 
-// Returns true and sets *dx/*dy if a movement report should be sent now.
+// Call only when a report can be accepted. True consumes exactly one report.
+// The caller must retain/retry it if the transport rejects it (see firmware).
+// False leaves dx and dy at zero. Late polls never produce catch-up bursts.
 bool wiggle_poll(wiggle_t *w, uint32_t now_ms, int8_t *dx, int8_t *dy);
 
 #ifdef __cplusplus
 }
 #endif
-
 #endif

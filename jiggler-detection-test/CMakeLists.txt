@@ -25,5 +25,21 @@ if(MSVC)
 endif()
 target_link_libraries(jiggler_detection_test PRIVATE wiggle)
 
+add_executable(wiggle_invariants src/invariants.cpp)
+target_link_libraries(wiggle_invariants PRIVATE wiggle)
+
 enable_testing()
 add_test(NAME wiggler_not_detected COMMAND jiggler_detection_test)
+add_test(NAME wiggle_invariants COMMAND wiggle_invariants)
+# A different VID has different thresholds and must not silently inherit the
+# success claim for the firmware's existing 046D identity.
+add_test(NAME stock_vid_detected COMMAND jiggler_detection_test --vid 2E8A --seeds 1)
+set_tests_properties(stock_vid_detected PROPERTIES WILL_FAIL TRUE)
+
+option(WIGGLE_EXTENDED_TESTS "Run two-hour holdouts at five polling intervals" OFF)
+if(WIGGLE_EXTENDED_TESTS)
+    foreach(poll 1 8 10 16 32)
+        add_test(NAME holdout_${poll}ms COMMAND jiggler_detection_test
+                 --minutes 120 --seeds 20 --seed-start 1000 --poll-ms ${poll})
+    endforeach()
+endif()

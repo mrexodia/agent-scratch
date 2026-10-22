@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cerrno>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -77,8 +79,8 @@ struct GeneratorInfo {
 };
 
 static const std::vector<GeneratorInfo> kGenerators = {
-    {"square", true, [] { return std::make_unique<WiggleGenerator>(WIGGLE_MODE_SQUARE); }},
-    {"realistic", true, [] { return std::make_unique<WiggleGenerator>(WIGGLE_MODE_REALISTIC); }},
+    {"quiet", true, [] { return std::make_unique<WiggleGenerator>(WIGGLE_MODE_QUIET); }},
+    {"sweep", true, [] { return std::make_unique<WiggleGenerator>(WIGGLE_MODE_SWEEP); }},
     {"baseline:naive", false, [] { return std::make_unique<NaiveGenerator>(); }},
     {"baseline:circle", false, [] { return std::make_unique<CircleGenerator>(); }},
 };
@@ -120,21 +122,27 @@ static RunResult Simulate(const GeneratorInfo& gen, const Scenario& sc, const st
     Detector det(cfg);
 
     RunResult r;
-    uint32_t next_check = 200;
-    for (uint32_t t = 0; t <= duration_ms; t += poll_ms) {
-        int8_t dx = 0, dy = 0;
-        if (g->Poll(t, dx, dy)) {
-            det.OnMove(t, dx, dy);
-            r.reports++;
+    // Run both clocks in chronological order. With (say) 16 ms polls, do not
+    // feed a report at 208 ms into the detector's earlier 200 ms check.
+    uint64_t next_poll = 0, next_check = 200;
+    while (std::min(next_poll, next_check) <= duration_ms) {
+        uint32_t t = (uint32_t)std::min(next_poll, next_check);
+        if (t == next_poll) {
+            int8_t dx = 0, dy = 0;
+            if (g->Poll(t, dx, dy)) {
+                det.OnMove(t, dx, dy);
+                r.reports++;
+            }
+            next_poll += poll_ms;
         }
-        while (next_check <= t) {
+        if (t == next_check) {
             DetectionResult res;
-            bool hit = det.Check(next_check, res);
+            bool hit = det.Check(t, res);
             r.max_behavior = std::max(r.max_behavior, det.device().behaviorSuspicionScore);
             r.max_combined = std::max(r.max_combined, det.device().combinedSuspicionScore);
             if (hit) {
                 r.detected = true;
-                r.detected_ms = next_check;
+                r.detected_ms = t;
                 r.reason = res.reason;
                 return r;
             }
@@ -146,45 +154,63 @@ static RunResult Simulate(const GeneratorInfo& gen, const Scenario& sc, const st
 
 static void Usage(const char* argv0) {
     std::printf(
-        "usage: %s [--minutes N] [--seeds N] [--vid XXXX] [--poll-ms N]\n"
+        "usage: %s [--minutes N] [--seeds N] [--seed-start N] [--vid XXXX] [--poll-ms N]\n"
         "  --minutes N   simulated time per run (default 30)\n"
         "  --seeds N     runs per generator/scenario (default 5)\n"
+        "  --seed-start N  first seed index (default 0; use for holdout runs)\n"
         "  --vid XXXX    USB vendor ID the detector sees (default 046D, Logitech)\n"
         "  --poll-ms N   host polling interval (default 8: Windows polls a\n"
         "                full-speed bInterval 10 endpoint every 8 ms)\n"
-        "Exit status is 1 if a wiggler mode was detected in any run.\n",
+        "Exit status is 1 for any wiggler detection, missed circle control, or inactive generator.\n",
         argv0);
 }
 
+static bool ParseUnsigned(const char* text, uint32_t& result, bool allow_zero = false) {
+    if (!text[0] || !std::isdigit((unsigned char)text[0])) return false;
+    char* end = nullptr;
+    errno = 0;
+    unsigned long long value = std::strtoull(text, &end, 10);
+    if (errno || *end || value > UINT32_MAX || (!value && !allow_zero)) return false;
+    result = (uint32_t)value;
+    return true;
+}
+
 int main(int argc, char** argv) {
-    uint32_t minutes = 30, seeds = 5, poll_ms = 8;
+    uint32_t minutes = 30, seeds = 5, seed_start = 0, poll_ms = 8;
     std::string vid = "046D";
     for (int i = 1; i < argc; i++) {
         auto arg = [&](const char* name) { return !std::strcmp(argv[i], name) && i + 1 < argc; };
-        if (arg("--minutes")) minutes = (uint32_t)std::atoi(argv[++i]);
-        else if (arg("--seeds")) seeds = (uint32_t)std::atoi(argv[++i]);
+        bool valid = true;
+        if (arg("--minutes")) valid = ParseUnsigned(argv[++i], minutes);
+        else if (arg("--seeds")) valid = ParseUnsigned(argv[++i], seeds);
+        else if (arg("--seed-start")) valid = ParseUnsigned(argv[++i], seed_start, true);
         else if (arg("--vid")) vid = argv[++i];
-        else if (arg("--poll-ms")) poll_ms = (uint32_t)std::atoi(argv[++i]);
-        else { Usage(argv[0]); return 2; }
+        else if (arg("--poll-ms")) valid = ParseUnsigned(argv[++i], poll_ms);
+        else valid = false;
+        if (!valid) { Usage(argv[0]); return 2; }
     }
-    if (!minutes || !seeds || !poll_ms) { Usage(argv[0]); return 2; }
+    if (minutes > UINT32_MAX / 60000u || poll_ms > minutes * 60000u ||
+        vid.size() != 4 || !std::all_of(vid.begin(), vid.end(), [](unsigned char c) { return std::isxdigit(c); })) {
+        Usage(argv[0]); return 2;
+    }
     for (auto& c : vid) c = (char)std::toupper((unsigned char)c);
 
-    std::printf("Detect My Jiggler simulation: VID %s (%s), %u min x %u seeds per row, %u ms polling\n\n",
-                vid.c_str(), GetVIDTrustLevelString(GetVIDTrustLevel(vid)), minutes, seeds, poll_ms);
+    std::printf("Detect My Jiggler simulation: VID %s (%s), %u min x %u seeds per row, first seed %u, %u ms polling\n\n",
+                vid.c_str(), GetVIDTrustLevelString(GetVIDTrustLevel(vid)), minutes, seeds, seed_start, poll_ms);
     std::printf("%-16s %-34s %-9s %-10s %-9s %s\n", "generator", "scenario", "detected", "first at",
                 "max score", "reason");
     std::printf("%s\n", std::string(120, '-').c_str());
 
     bool wiggler_detected = false;
-    bool baseline_missed = false;
+    bool baseline_missed = false, inactive = false;
     for (const auto& gen : kGenerators) {
         for (const auto& sc : kScenarios) {
             uint32_t hits = 0, first_ms = UINT32_MAX;
             int max_behavior = 0, max_combined = 0;
             std::set<std::string> reasons;
             for (uint32_t s = 0; s < seeds; s++) {
-                RunResult r = Simulate(gen, sc, vid, s, minutes * 60000u, poll_ms);
+                RunResult r = Simulate(gen, sc, vid, uint64_t(seed_start) + s, minutes * 60000u, poll_ms);
+                if (gen.is_wiggler && !r.detected && r.reports < minutes * 2u) inactive = true;
                 max_behavior = std::max(max_behavior, r.max_behavior);
                 max_combined = std::max(max_combined, r.max_combined);
                 if (r.detected) {
@@ -211,8 +237,10 @@ int main(int argc, char** argv) {
 
     std::printf("\nmax score = highest behaviour / combined (VID + behaviour) suspicion score seen.\n");
     if (baseline_missed) {
-        std::printf("WARNING: the circle baseline was not always detected; check the harness.\n");
+        std::printf("FAIL: the circle baseline was not always detected; check the harness/workload.\n");
     }
-    std::printf("%s\n", wiggler_detected ? "RESULT: wiggler DETECTED" : "RESULT: wiggler not detected");
-    return wiggler_detected ? 1 : 0;
+    if (inactive) std::printf("FAIL: a wiggler emitted fewer than two reports per simulated minute.\n");
+    std::printf("%s\n", wiggler_detected ? "RESULT: wiggler DETECTED" :
+                (baseline_missed || inactive) ? "RESULT: invalid workload/control" : "RESULT: wiggler not detected");
+    return (wiggler_detected || baseline_missed || inactive) ? 1 : 0;
 }

@@ -23,6 +23,8 @@ target_link_libraries(mouse_wiggler PRIVATE
     pico_stdlib
     pico_rand
     hardware_pio
+    hardware_flash
+    hardware_sync
     tinyusb_device
     wiggle
 )
