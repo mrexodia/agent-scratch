@@ -7,7 +7,12 @@
  * #MF / #UD was raised).
  *
  * usage: hostdiff [-s seed] [-n count] [-o op] [-m modrm] [-v maxprint]
- *                 [-t] (include transcendentals in strict compare) [-T] (only transcendentals)
+ *   -N  skip the transcendental instructions
+ *   -T  only the transcendental instructions
+ *   -t  treat value-only differences of transcendentals as failures too
+ *   -G file  record every case with the host's result (for tests/replay)
+ *   -A  accuracy report: transcendentals on ordinary in-range operands
+ *       (all exceptions masked), reporting the bit-exact rate per instruction
  */
 #if !defined(__x86_64__)
 #error "hostdiff needs an x86-64 host"
@@ -161,7 +166,7 @@ typedef struct {
     int      result; /* 0 ok, 1 #MF, 2 #UD */
 } tresult;
 
-static void run_host(unsigned op, unsigned modrm, const tcase *t, tresult *r)
+static void run_host(unsigned op, unsigned modrm, int pfx66, const tcase *t, tresult *r)
 {
     uint8_t *p = stub;
     uint64_t regs[2] = { 0, 0 };
@@ -169,6 +174,7 @@ static void run_host(unsigned op, unsigned modrm, const tcase *t, tresult *r)
     *p++ = 0x41; *p++ = 0x50; *p++ = 0x9D;             /* push r8; popfq */
     *p++ = 0xDD; *p++ = 0x26;                          /* frstor [rsi] */
     *p++ = 0xB8; *p++ = 0x5A; *p++ = 0x5A; *p++ = 0x5A; *p++ = 0x5A; /* mov eax, 0x5a5a5a5a */
+    if (pfx66) *p++ = 0x66;
     *p++ = (uint8_t)op;
     *p++ = (uint8_t)(modrm < 0xC0 ? ((modrm & 0x38) | 0x07) : modrm);
     *p++ = 0x9C; *p++ = 0x41; *p++ = 0x59;             /* pushfq; pop r9 */
@@ -197,7 +203,7 @@ static void run_host(unsigned op, unsigned modrm, const tcase *t, tresult *r)
     r->eflags = regs[1] & 0x8D5;
 }
 
-static void run_emu(unsigned op, unsigned modrm, const tcase *t, tresult *r)
+static void run_emu(unsigned op, unsigned modrm, int pfx66, const tcase *t, tresult *r)
 {
     x87_state s;
     x87_insn in;
@@ -212,7 +218,7 @@ static void run_emu(unsigned op, unsigned modrm, const tcase *t, tresult *r)
 
     memcpy(r->mem, t->mem, sizeof r->mem);
     memset(&in, 0, sizeof in);
-    in.op = (uint8_t)op; in.modrm = (uint8_t)modrm; in.mem = r->mem; in.env_fmt = X87_ENV_PM32;
+    in.op = (uint8_t)op; in.modrm = (uint8_t)modrm; in.mem = r->mem; in.env_fmt = pfx66 ? X87_ENV_PM16 : X87_ENV_PM32;
     in.eflags = (uint32_t)t->eflags;
     in.ax = 0x5A5A;
     res = x87_exec(&s, &in);
@@ -279,6 +285,34 @@ static void gen_state(uint8_t *img, int allow_pending)
         x87_f80_store(img + 28 + 10 * i, regs[(top + i) & 7]);
 }
 
+/* Ordinary operands for the accuracy report. */
+static x87_f80 norm_f80(int emin, int emax, int allow_neg)
+{
+    x87_f80 v;
+    v.mant = rnd() | 0x8000000000000000ull;
+    v.sexp = (uint16_t)(0x3FFF + emin + (int)rn((unsigned)(emax - emin + 1)));
+    if (allow_neg && rn(2)) v.sexp |= 0x8000;
+    return v;
+}
+
+static void gen_accuracy_state(unsigned modrm, uint8_t *img)
+{
+    x87_f80 st0, st1 = norm_f80(-10, 10, 1);
+    memset(img, 0, 108);
+    wr16(img, 0x037F | (rn(4) << 10)); wr16(img + 2, 0xFFFF);
+    wr16(img + 4, 0); wr16(img + 6, 0xFFFF);
+    wr16(img + 8, 0xFFF0); wr16(img + 10, 0xFFFF);
+    switch (modrm) {
+    case 0xF0: st0 = norm_f80(-20, -1, 1); break;   /* f2xm1: |x| < 1 */
+    case 0xF1: st0 = norm_f80(-10, 10, 0); break;   /* fyl2x: x > 0 */
+    case 0xF3: st0 = norm_f80(-10, 10, 1); break;   /* fpatan */
+    case 0xF9: st0 = norm_f80(-20, -2, 1); break;   /* fyl2xp1: |x| < 0.29 */
+    default:   st0 = rn(2) ? norm_f80(-20, 1, 1) : norm_f80(2, 40, 1); break; /* trig */
+    }
+    x87_f80_store(img + 28, st0);
+    x87_f80_store(img + 38, st1);
+}
+
 static void gen_mem(unsigned op, unsigned modrm, uint8_t *mem)
 {
     unsigned reg = (modrm >> 3) & 7;
@@ -339,13 +373,50 @@ static void dump_mem(const char *name, const uint8_t *m, size_t n)
     printf("\n");
 }
 
+/* FXSAVE64 / FXRSTOR64 against the host. */
+static unsigned long test_fxsave(long count)
+{
+    unsigned long bad = 0;
+    static uint8_t img[108], out_h[108], out_e[108];
+    static uint8_t area_h[512] __attribute__((aligned(16))), area_e[512];
+    for (long n = 0; n < count; n++) {
+        x87_state s;
+        x87_insn in;
+        uint8_t tmp[108];
+        gen_state(img, 1);
+        /* host: frstor; fxsave64; (fninit); fxrstor64; fnsave */
+        __asm__ volatile("frstor %0\n fxsave64 %1\n fninit\n fxrstor64 %1\n fnsave %2"
+                         : : "m"(*(uint8_t(*)[108])img), "m"(*(uint8_t(*)[512])area_h), "m"(*(uint8_t(*)[108])out_h) : "memory");
+        x87_init(&s);
+        memcpy(tmp, img, 108);
+        memset(&in, 0, sizeof in);
+        in.op = 0xDD; in.modrm = 0x26; in.mem = tmp;
+        x87_exec(&s, &in);
+        memcpy(area_e, area_h, 512);
+        memset(area_e, 0xAA, 6); memset(area_e + 32, 0xAA, 128);
+        x87_fxsave(&s, area_e, 1);
+        x87_init(&s);
+        x87_fxrstor(&s, area_e, 1);
+        in.modrm = 0x36; in.mem = out_e;
+        x87_exec(&s, &in);
+        memset(out_h + 12, 0, 16); memset(out_e + 12, 0, 16);
+        if (memcmp(area_h, area_e, 6) || memcmp(area_h + 32, area_e + 32, 128) || memcmp(out_h, out_e, 108)) {
+            if (!bad) { printf("FXSAVE mismatch\n"); dump_state("in", img); dump_state("host", out_h); dump_state("emu", out_e); }
+            bad++;
+        }
+    }
+    return bad;
+}
+
 int main(int argc, char **argv)
 {
     long count = 1000000, maxprint = 10, printed = 0;
-    int only_op = -1, only_modrm = -1, strict_trans = 0, only_trans = 0, no_trans = 0;
+    int only_op = -1, only_modrm = -1, strict_trans = 0, only_trans = 0, no_trans = 0, accuracy = 0;
     static unsigned long fails[8][256], runs[8][256], softfails[8][256];
     unsigned long total_fail = 0, total_soft = 0;
+    uint64_t max_ulp = 0;
     struct sigaction sa;
+    FILE *rec = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-s") && i + 1 < argc) rng_s ^= strtoull(argv[++i], 0, 0) * 0x9E3779B97F4A7C15ull + 1;
@@ -356,6 +427,11 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-t")) strict_trans = 1;
         else if (!strcmp(argv[i], "-T")) only_trans = 1;
         else if (!strcmp(argv[i], "-N")) no_trans = 1;
+        else if (!strcmp(argv[i], "-G") && i + 1 < argc) {
+            rec = fopen(argv[++i], "wb");
+            if (!rec) { perror("fopen"); return 2; }
+        }
+        else if (!strcmp(argv[i], "-A")) accuracy = only_trans = 1;
         else { fprintf(stderr, "bad arg %s\n", argv[i]); return 2; }
     }
     stub = mmap(0, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -366,11 +442,17 @@ int main(int argc, char **argv)
     sigaction(SIGFPE, &sa, 0);
     sigaction(SIGILL, &sa, 0);
 
+    if (!accuracy && only_op < 0) {
+        unsigned long fx = test_fxsave(count / 100 + 100);
+        printf("FXSAVE/FXRSTOR: %lu mismatches\n", fx);
+        total_fail += fx;
+    }
+
     for (long n = 0; n < count; n++) {
         static tcase t;
         static tresult h, e;
         unsigned op = 0xD8 + rn(8), modrm, trans;
-        int acc, soft = 0, bad = 0;
+        int acc, soft = 0, bad = 0, pfx66 = 0, is_env;
         size_t msz;
 
         if (only_trans) {
@@ -384,18 +466,46 @@ int main(int argc, char **argv)
         trans = is_trans(op, modrm);
         if (trans && no_trans) continue;
 
-        gen_state(t.in_state, rn(8) == 0);
+        if (accuracy)
+            gen_accuracy_state(modrm, t.in_state);
+        else
+            gen_state(t.in_state, rn(8) == 0);
         gen_mem(op, modrm, t.mem);
         t.eflags = 0x202 | (rnd() & 0x8D5);
-        msz = x87_mem_operand((uint8_t)op, (uint8_t)modrm, X87_ENV_PM32, &acc);
+        /* environment instructions: also exercise the 16-bit layout */
+        is_env = modrm < 0xC0 && (op == 0xD9 || op == 0xDD) && ((modrm & 0x38) == 0x20 || (modrm & 0x38) == 0x30);
+        if (is_env && rn(2)) {
+            pfx66 = 1;
+            if ((modrm & 0x38) == 0x20) {
+                /* convert the generated 32-bit image into the 16-bit layout */
+                uint8_t img[108];
+                memcpy(img, t.mem, 108);
+                memcpy(t.mem, img, 2); memcpy(t.mem + 2, img + 4, 2); memcpy(t.mem + 4, img + 8, 2);
+                memset(t.mem + 6, 0, 8);
+                memcpy(t.mem + 14, img + 28, 80);
+            }
+        }
+        msz = x87_mem_operand((uint8_t)op, (uint8_t)modrm, pfx66 ? X87_ENV_PM16 : X87_ENV_PM32, &acc);
 
-        run_host(op, modrm, &t, &h);
-        run_emu(op, modrm, &t, &e);
+        run_host(op, modrm, pfx66, &t, &h);
+        run_emu(op, modrm, pfx66, &t, &e);
 
+        if (rec) {
+            /* record: header, input state, input operand, host state, host operand */
+            uint8_t hd[12] = { (uint8_t)op, (uint8_t)modrm, (uint8_t)pfx66, (uint8_t)h.result,
+                               (uint8_t)t.eflags, (uint8_t)(t.eflags >> 8), (uint8_t)h.eflags, (uint8_t)(h.eflags >> 8),
+                               (uint8_t)h.ax, (uint8_t)(h.ax >> 8), (uint8_t)msz, 0 };
+            fwrite(hd, 1, 12, rec);
+            fwrite(t.in_state, 1, 108, rec);
+            fwrite(t.mem, 1, msz, rec);
+            fwrite(h.state, 1, 108, rec);
+            fwrite(h.mem, 1, msz, rec);
+        }
         /* ignore FIP/FCS/FOP/FDP/FDS */
         memset(h.state + 12, 0, 16); memset(e.state + 12, 0, 16);
-        if (modrm < 0xC0 && ((op == 0xD9 && (modrm & 0x38) == 0x30) || (op == 0xDD && (modrm & 0x38) == 0x30))) {
-            memset(h.mem + 12, 0, 16); memset(e.mem + 12, 0, 16);
+        if (is_env && (modrm & 0x38) == 0x30) {
+            if (pfx66) { memset(h.mem + 6, 0, 8); memset(e.mem + 6, 0, 8); }
+            else { memset(h.mem + 12, 0, 16); memset(e.mem + 12, 0, 16); }
         }
         runs[op & 7][modrm]++;
         if (h.result != e.result || h.ax != e.ax || h.eflags != e.eflags ||
@@ -409,13 +519,29 @@ int main(int argc, char **argv)
                 if (((hs ^ es) & ~0x0200u) == 0) { soft = 1; bad = 0; }
             }
         }
-        if (soft) { softfails[op & 7][modrm]++; total_soft++; }
+        if (soft) {
+            softfails[op & 7][modrm]++; total_soft++;
+            /* track the largest distance in units in the last place */
+            for (int k = 0; k < 8; k++) {
+                x87_f80 a = x87_f80_load(h.state + 28 + 10 * k), b = x87_f80_load(e.state + 28 + 10 * k);
+                uint64_t d;
+                if (a.sexp == b.sexp)
+                    d = a.mant > b.mant ? a.mant - b.mant : b.mant - a.mant;
+                else if ((a.sexp ^ b.sexp) & 0x8000)
+                    d = ~0ull;
+                else {
+                    x87_f80 lo = a.sexp < b.sexp ? a : b, hi = a.sexp < b.sexp ? b : a;
+                    d = (hi.sexp - lo.sexp == 1 && hi.mant == 0x8000000000000000ull) ? (0 - lo.mant) : ~0ull;
+                }
+                if (d > max_ulp) max_ulp = d;
+            }
+        }
         if (bad) {
             fails[op & 7][modrm]++;
             total_fail++;
             if (printed < maxprint) {
                 printed++;
-                printf("MISMATCH #%ld: %02X %02X  eflags_in=%03llx\n", n, op, modrm, (unsigned long long)(t.eflags & 0x8D5));
+                printf("MISMATCH #%ld: %s%02X %02X  eflags_in=%03llx\n", n, pfx66 ? "66 " : "", op, modrm, (unsigned long long)(t.eflags & 0x8D5));
                 dump_state("in", t.in_state);
                 if (msz) dump_mem("in", t.mem, msz);
                 printf("  host: result=%d ax=%04llx eflags=%03llx\n", h.result, (unsigned long long)h.ax, (unsigned long long)h.eflags);
@@ -427,6 +553,19 @@ int main(int argc, char **argv)
             }
         }
     }
+    if (accuracy) {
+        static const struct { int m; const char *name; } tn[8] = {
+            { 0xFE, "FSIN" }, { 0xFF, "FCOS" }, { 0xFB, "FSINCOS" }, { 0xF2, "FPTAN" },
+            { 0xF3, "FPATAN" }, { 0xF0, "F2XM1" }, { 0xF1, "FYL2X" }, { 0xF9, "FYL2XP1" } };
+        printf("bit-exact rate against this host (values, flags and C1):\n");
+        for (int i = 0; i < 8; i++) {
+            unsigned long r = runs[1][tn[i].m], f = fails[1][tn[i].m] + softfails[1][tn[i].m];
+            printf("  %-8s %7.3f%%  (%lu of %lu differ; %lu in more than the value)\n", tn[i].name,
+                   r ? 100.0 * (double)(r - f) / (double)r : 0.0, f, r, fails[1][tn[i].m]);
+        }
+        printf("largest value difference: %llu ulp\n", (unsigned long long)max_ulp);
+        return 0;
+    }
     if (total_fail || total_soft) {
         printf("per-opcode failures (hard/soft/runs):\n");
         for (int o = 0; o < 8; o++)
@@ -434,6 +573,9 @@ int main(int argc, char **argv)
                 if (fails[o][m] || softfails[o][m])
                     printf("  %02X %02X: %lu / %lu / %lu\n", 0xD8 + o, m, fails[o][m], softfails[o][m], runs[o][m]);
     }
-    printf("%ld cases, %lu mismatches, %lu transcendental value-only differences\n", count, total_fail, total_soft);
+    if (rec)
+        fclose(rec);
+    printf("%ld cases, %lu mismatches, %lu transcendental value-only differences (largest: %llu ulp)\n", count, total_fail,
+           total_soft, (unsigned long long)max_ulp);
     return total_fail != 0;
 }

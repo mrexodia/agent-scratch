@@ -225,6 +225,14 @@ static bf bf_scale(bf a, int n)
     return a;
 }
 
+/* Truncate to the 67 significant bits the hardware carries internally. */
+static bf bf_chop67(bf a)
+{
+    a.m[1] &= 0xE000000000000000ull;
+    a.m[0] = 0;
+    return a;
+}
+
 static x87_f80 bf_round(fctx *c, const bf *a)
 {
     if (bf_is_zero(a))
@@ -596,7 +604,7 @@ x87_f80 x87i_fpatan(fctx *c, const unp *y, const unp *x)
 
 x87_f80 x87i_f2xm1(fctx *c, const unp *a)
 {
-    bf z, v;
+    bf x, z, v;
     x87_f80 r;
     if (a->kind >= K_QNAN)
         return x87i_nan1(c, a);
@@ -613,9 +621,14 @@ x87_f80 x87i_f2xm1(fctx *c, const unp *a)
             return a->sign ? F80(0xBFFE, 0x8000000000000000ull) : F80(0x3FFF, 0x8000000000000000ull);
         return F80((a->sign << 15) | a->exp, a->sig); /* out of range: unchanged */
     }
-    z = bf_from_unp(a);
-    z = bf_mul(&z, &BF_LN2);
+    /* (2^x - 1) / x truncated to 67 bits, times x: the best fit to what
+     * the hardware produces */
+    x = bf_from_unp(a);
+    z = bf_mul(&x, &BF_LN2);
     v = k_expm1(&z);
+    v = bf_div(&v, &x);
+    v = bf_chop67(v);
+    v = bf_mul(&v, &x);
     r = bf_finish(c, &v);
     return r;
 }
@@ -662,6 +675,9 @@ x87_f80 x87i_fyl2x(fctx *c, const unp *y, const unp *x)
         bf eps = bf_from_u128(1, l.exp - 160, 0);
         l = bf_add(&l, &eps);
     }
+    /* Measured against real hardware: the logarithm is truncated to 67
+     * bits before the multiplication by y. */
+    l = bf_chop67(l);
     by = bf_from_unp(y);
     v = bf_mul(&l, &by);
     r = bf_finish(c, &v);
@@ -706,6 +722,7 @@ x87_f80 x87i_fyl2xp1(fctx *c, const unp *y, const unp *x)
         }
         l = k_log2(&s);
     }
+    l = bf_chop67(l);
     by = bf_from_unp(y);
     v = bf_mul(&l, &by);
     r = bf_finish(c, &v);

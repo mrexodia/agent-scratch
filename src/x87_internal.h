@@ -35,8 +35,8 @@ typedef struct unp {
 typedef struct fctx {
     uint16_t cw;
     uint16_t ex;    /* accumulated exception flags */
-    uint8_t  c1;    /* last rounding was away from zero */
-    uint8_t  abort; /* unmasked over/underflow on a memory store */
+    int      c1;    /* last rounding was away from zero */
+    int      abort; /* unmasked over/underflow on a memory store */
 } fctx;
 
 #define F80(se, m) ((x87_f80){ (m), (uint16_t)(se) })

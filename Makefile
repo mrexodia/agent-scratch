@@ -15,10 +15,19 @@ src/%.o: src/%.c include/x87.h src/x87_internal.h
 tests/hostdiff: tests/hostdiff.c libx87.a
 	$(CC) $(CFLAGS) -D_GNU_SOURCE $< libx87.a -o $@
 
-check: tests/hostdiff
-	tests/hostdiff -n 2000000
+tests/replay: tests/replay.c libx87.a
+	$(CC) $(CFLAGS) $< libx87.a -o $@
+
+# Portable: replay vectors recorded on real hardware.
+check: tests/replay
+	tests/replay tests/vectors/*.bin
+
+# x86-64 hosts only: differential test against the host CPU.
+check-host: tests/hostdiff
+	tests/hostdiff -n 5000000
+	tests/hostdiff -A -n 800000
 
 clean:
-	rm -f $(OBJ) libx87.a tests/hostdiff
+	rm -f $(OBJ) libx87.a tests/hostdiff tests/replay
 
-.PHONY: all check clean
+.PHONY: all check check-host clean

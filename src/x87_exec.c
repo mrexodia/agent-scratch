@@ -224,7 +224,6 @@ static void load_env(x87_state *s, const uint8_t *p, int fmt)
         s->fcs = rd16(p + 8);
         s->fdp = rd16(p + 10);
         s->fds = rd16(p + 12);
-        s->fop = 0;
         set_cw(s, rd16(p));
         break;
     case X87_ENV_RM32:
@@ -468,18 +467,14 @@ static void do_fprem(x87_state *s, int ieee)
                 rem = a.sig;
                 rexp = a.exp;
             } else if (d == -1) {
-                /* |a| in [|b|/4, |b|/2) .. [|b|/2, |b|) */
+                /* FPREM1 with |b|/2 <= |a| < |b|: the quotient rounds to 1
+                 * when |a| > |b|/2, giving r = a - b */
+                rem = a.sig;
+                rexp = a.exp;
                 if (a.sig > b.sig) {
-                    /* a > b/2: round quotient up to 1, r = a - b */
-                    u128 t = ((u128)b.sig << 1) - a.sig; /* in units of a's ulp */
+                    rem = (uint64_t)(((u128)b.sig << 1) - a.sig);
                     q = 1;
                     sign ^= 1;
-                    rexp = a.exp;
-                    /* t < 2^64 because a.sig > b.sig */
-                    rem = (uint64_t)t;
-                } else {
-                    rem = a.sig;
-                    rexp = a.exp;
                 }
             } else if (d < 64) {
                 u128 n = (u128)a.sig << d;
@@ -855,7 +850,7 @@ static int do_store(x87_state *s, int kind, int trunc, int npop, uint8_t *mem)
         } else {
             if (inexact)
                 c.ex |= PE;
-            c.c1 = (uint8_t)up;
+            c.c1 = up;
             for (int i = 0; i < 9; i++) {
                 unsigned d = (unsigned)(mag % 100);
                 mag /= 100;
