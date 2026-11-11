@@ -71,6 +71,7 @@ not spelled out in, the SDM — all reproduced:
 
 * Transcendentals ignore precision control and always report `PE`.
 * FSIN/FCOS return `x` / `1.0` unchanged below 2^-68, FPTAN below 2^-33,
+  and FPATAN returns the plain quotient y/x when it is below 2^-40 (x > 0),
   regardless of rounding mode; FSIN(π) etc. follow the 66-bit π exactly.
 * F2XM1 with |x| > 1 and FYL2XP1 with x ≤ -1 return the operand unchanged.
 * FYL2X of 2^-n comes out a hair above `-n` (visible in directed rounding).
@@ -83,6 +84,54 @@ not spelled out in, the SDM — all reproduced:
   through by FPREM/FSCALE come out normalised.
 * F[U]COMI[P] and FCMOVcc leave C1 alone; FFREE/FFREEP clear it.
 * `D9 D8+i` (FSTP alias) does not raise a stack fault on an empty ST(0).
+
+### Checking real programs: `x87trace`
+
+`tests/x87trace` runs any x86-64 Linux program under ptrace, single-steps
+it, and compares **every x87 instruction it executes on the CPU** with the
+emulator (same input state and memory operand; full output state compared).
+That turns existing test suites and ordinary programs into hardware-verified
+test cases without relying on their expected values:
+
+| Program traced | x87 instructions | Encodings | Mismatches |
+|---|---|---|---|
+| QEMU `tests/tcg/i386` x87 tests (fxam, fldcst, pseudo-denormal, snan-convert, fisttp, fbstp, fscale, fxtract, fp-exceptions, fyl2x, fyl2xp1, f2xm1, fpatan, fprem sample) | ~139,000 | 56 | 0 |
+| glibc long double libm over edge cases, all rounding / precision modes (`tests/workloads/libm_ld.c`) | 1,573,624 | 168 | 0 |
+| float/double game-style code built with `-mfpmath=387` (`tests/workloads/fp387.c`) | 118,485 | 80 | 0 |
+
+On QEMU's hard-case tables the result values are bit-identical to the CPU in
+1121 of 1122 FYL2X cases, 1004 of 1032 FPATAN, 1026 of 1117 FYL2XP1 and 964
+of 1103 F2XM1 (the rest differ by 1 ulp, as described above). The QEMU
+sources are GPL and are downloaded by `tests/trace-qemu.sh`, not shipped;
+a thinned-out selection of the *recorded hardware results* from all three
+runs is in `tests/vectors/traced-*.bin` and replayed by `make check`. I did
+not find comparable stand-alone x87 test programs in Bochs; any that exist
+can be traced the same way.
+
+```sh
+make check-trace                         # the above, libm limited to 300k instructions
+tests/x87trace -q ./your-program args    # anything else; build it -static -no-pie
+tests/x87trace -G out.bin ./program      # also record the cases for tests/replay
+```
+
+### Performance
+
+`make bench`, on the reference Xeon (ns per operation, value-level API):
+
+| | ns | | ns |
+|---|---|---|---|
+| add / sub | ~20 | sin, cos | ~320 |
+| mul | ~20 | sincos | ~600 |
+| div | ~19 | tan | ~750 |
+| sqrt | ~30 | atan2 | ~830 |
+| compare, rndint, to int | ~10 | 2xm1, yl2x, yl2xp1 | ~700 |
+| to / from double | 15 / 6 | interpreter, per instruction | ~25 |
+
+Basic arithmetic is roughly 10-20x slower than native floating point, which
+is typical for soft-float; the transcendentals carry 192 bits internally to
+get the last bit right and are correspondingly slower. A translator that
+does not need bit-exactness should map hot double-precision arithmetic to
+host doubles and use this library for the rest.
 
 ### Using it
 
@@ -165,12 +214,14 @@ make                # libx87.a
 make check          # portable: value-API test + replay of vectors recorded on the
                     # reference CPU (also built without __int128)
 make check-host     # x86-64 only: differential test against *your* CPU
+make check-trace    # x86-64 Linux: trace QEMU's tests, libm and 387 code
+make bench          # ns per operation
 tests/hostdiff -n 20000000 -s 42     # more cases, other seed
 tests/hostdiff -A                    # transcendental bit-exact report
 ```
 
-`make check` works on any architecture: `tests/vectors/*.bin` holds ~5,900
-cases recorded with `hostdiff -G`, and `tests/replay` requires the emulator
+`make check` works on any architecture: `tests/vectors/*.bin` holds ~26,700
+cases recorded with `hostdiff -G` and `x87trace -G`, and `tests/replay` requires the emulator
 to reproduce the recorded hardware state. Running `make check-host` on an
 AMD or older Intel machine shows precisely where that CPU differs from the
 reference.
@@ -187,10 +238,6 @@ reference.
   exception" and FCS/FDS-deprecation modes of recent CPUs are not modelled.
   These fields, and the real-mode environment layouts, could not be compared
   against hardware from a 64-bit user-mode process.
-* The existing emulator test suites (QEMU `tests/tcg/i386`, Bochs) were not
-  used: they are self-checking programs for the machine they run on, and a
-  direct differential test against silicon is strictly stronger.
-
 ### Layout
 
 | | |
@@ -203,5 +250,9 @@ reference.
 | `src/x87_exec.c` | decoder, stack / tag handling, state images |
 | `src/x87_amalgam.c` | single translation unit build |
 | `tests/ops_test.c` | portable test of the value-level API |
+| `src/x87_tables.h` | series coefficients (generated by `tools/gen_tables.py`) |
 | `tests/hostdiff.c` | differential tester against the host CPU |
+| `tests/x87trace.c` | checks the x87 instructions of any running program against the CPU |
+| `tests/workloads/`, `tests/trace-qemu.sh` | programs to trace |
+| `tests/bench.c` | micro-benchmark |
 | `tests/replay.c`, `tests/vectors/` | portable replay of recorded hardware vectors |

@@ -225,3 +225,7 @@ tests/replay
 tests/replay-noint128
 tests/ops_test
 *.bc
+tests/x87trace
+tests/bench
+tests/workloads/libm_ld
+tests/workloads/fp387

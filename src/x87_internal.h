@@ -36,9 +36,17 @@ static inline uint64_t mul64(uint64_t a, uint64_t b, uint64_t *hi)
 /* (hi:lo) / d for hi < d; returns the quotient, stores the remainder */
 static inline uint64_t div128(uint64_t hi, uint64_t lo, uint64_t d, uint64_t *rem)
 {
+#if defined(__x86_64__) && defined(__GNUC__)
+    /* the quotient fits because hi < d: one DIV instead of a libcall */
+    uint64_t q, r;
+    __asm__("divq %[d]" : "=a"(q), "=d"(r) : "a"(lo), "d"(hi), [d] "rm"(d) : "cc");
+    *rem = r;
+    return q;
+#else
     unsigned __int128 n = ((unsigned __int128)hi << 64) | lo;
     *rem = (uint64_t)(n % d);
     return (uint64_t)(n / d);
+#endif
 }
 
 #else

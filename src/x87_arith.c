@@ -419,11 +419,24 @@ X87_INTERNAL x87_f80 x87i_div(fctx *c, const unp *a, const unp *b)
     return x87i_round_pack(c, sign, exp, q, q2);
 }
 
+/* floor(sqrt(v)) for v >= 2^62; the root is in [2^31, 2^32) */
+static uint64_t isqrt64(uint64_t v)
+{
+    /* Newton's iteration from above converges monotonically */
+    uint64_t x = 0xFFFFFFFFull, y;
+    for (;;) {
+        y = (x + v / x) >> 1;
+        if (y >= x)
+            return x;
+        x = y;
+    }
+}
+
 X87_INTERNAL x87_f80 x87i_sqrt(fctx *c, const unp *a)
 {
-    w128 n, rem, s, bit;
+    uint64_t hi, lo, s1, r1, q, u, s, a1, a0, rem_lo, q2_hi, q2_lo;
+    w128 num, rem, q2;
     int32_t e;
-    uint64_t lo;
 
     if (a->kind >= K_QNAN)
         return x87i_nan1(c, a);
@@ -436,30 +449,37 @@ X87_INTERNAL x87_f80 x87i_sqrt(fctx *c, const unp *a)
     if (a->kind == K_DEN)
         c->flags |= DE;
 
-    /* value = n * 2^(e - 126) with e even and n in [2^126, 2^128) */
+    /* value = n * 2^(e - 126) with e even and n = hi:lo in [2^126, 2^128) */
     e = a->exp - 16383;
     if (e & 1) {
-        n = w_make(a->sig, 0);
+        hi = a->sig; lo = 0;
         e -= 1;
     } else {
-        n = w_make(a->sig >> 1, a->sig << 63);
+        hi = a->sig >> 1; lo = a->sig << 63;
     }
-    /* digit-by-digit integer square root: s = floor(sqrt(n)), rem = n - s^2 */
-    s = w_make(0, 0);
-    rem = n;
-    bit = w_make(0x4000000000000000ull, 0);
-    while (!w_is_zero(bit)) {
-        w128 t = w_add(s, bit, 0);
-        s = w_shr(s, 1);
-        if (w_cmp(rem, t) >= 0) {
-            rem = w_sub(rem, t);
-            s = w_add(s, bit, 0);
-        }
-        bit = w_shr(bit, 2);
+    /*
+     * Integer square root with remainder of the 128-bit n, by one
+     * "Karatsuba" step (Zimmermann): take the root s1 of the top half,
+     * then divide to get the low half of the root.
+     */
+    a1 = lo >> 32; a0 = (uint32_t)lo;
+    s1 = isqrt64(hi);
+    r1 = hi - s1 * s1;                      /* <= 2*s1 */
+    num = w_make(r1 >> 32, (r1 << 32) | a1); /* r1 * 2^32 + a1 */
+    q = div128(num.hi, num.lo, 2 * s1, &u);
+    s = (s1 << 32) + q;
+    /* remainder = u * 2^32 + a0 - q^2 (may be negative: then s is one too big) */
+    rem = w_make(u >> 32, (u << 32) | a0);
+    q2_lo = mul64(q, q, &q2_hi);
+    q2 = w_make(q2_hi, q2_lo);
+    if (w_cmp(rem, q2) < 0) {
+        s--;
+        rem = w_add(rem, w_make(s >> 63, (s << 1) | 1), 0); /* + 2s + 1 */
     }
-    /* compare the remainder with s to get the guard and sticky bits */
-    lo = w_cmp(rem, s) > 0 ? 0xC000000000000000ull : !w_is_zero(rem) ? 0x4000000000000000ull : 0;
-    return x87i_round_pack(c, 0, (e >> 1) + 16383, s.lo, lo);
+    rem = w_sub(rem, q2);
+    /* s = floor(sqrt(n)), rem = n - s^2 <= 2s.  sqrt(n) > s + 1/2 iff rem > s */
+    rem_lo = (rem.hi || rem.lo > s) ? 0xC000000000000000ull : rem.lo ? 0x4000000000000000ull : 0;
+    return x87i_round_pack(c, 0, (e >> 1) + 16383, s, rem_lo);
 }
 
 /* ------------------------------------------------------------------ */

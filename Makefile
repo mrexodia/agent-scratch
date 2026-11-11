@@ -9,7 +9,7 @@ all: libx87.a
 libx87.a: $(OBJ)
 	$(AR) rcs $@ $^
 
-src/%.o: src/%.c include/x87.h include/x87_ops.h src/x87_internal.h
+src/%.o: src/%.c include/x87.h include/x87_ops.h src/x87_internal.h src/x87_tables.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 tests/hostdiff: tests/hostdiff.c libx87.a
@@ -25,6 +25,29 @@ tests/ops_test: tests/ops_test.c libx87.a
 # 64-bit arithmetic (no unsigned __int128).
 tests/replay-noint128: tests/replay.c $(SRC) src/x87_amalgam.c include/x87.h include/x87_ops.h src/x87_internal.h
 	$(CC) $(CFLAGS) -DX87_NO_INT128 tests/replay.c src/x87_amalgam.c -o $@
+
+tests/x87trace: tests/x87trace.c libx87.a
+	$(CC) $(CFLAGS) $< libx87.a -o $@
+
+tests/bench: tests/bench.c libx87.a
+	$(CC) $(CFLAGS) $< libx87.a -o $@
+
+bench: tests/bench
+	tests/bench
+
+# x86-64 Linux only: check every x87 instruction executed by real programs
+# (QEMU's tcg tests, glibc's long double libm, 387 code generation) against
+# the CPU.
+tests/workloads/libm_ld: tests/workloads/libm_ld.c
+	$(CC) -O1 -static -no-pie -w $< -o $@ -lm
+
+tests/workloads/fp387: tests/workloads/fp387.c
+	$(CC) -O2 -mfpmath=387 -static -no-pie -w $< -o $@ -lm
+
+check-trace: tests/x87trace tests/workloads/fp387 tests/workloads/libm_ld
+	tests/trace-qemu.sh $(TRACE_WORKDIR)
+	tests/x87trace -q tests/workloads/fp387
+	tests/x87trace -q -n 300000 tests/workloads/libm_ld 2
 
 # LLVM bitcode of the whole library, for linking into lifted code.
 x87.bc: $(SRC) src/x87_amalgam.c include/x87.h include/x87_ops.h src/x87_internal.h
@@ -42,6 +65,7 @@ check-host: tests/hostdiff
 	tests/hostdiff -A -n 800000
 
 clean:
-	rm -f $(OBJ) libx87.a x87.bc tests/hostdiff tests/replay tests/replay-noint128 tests/ops_test
+	rm -f $(OBJ) libx87.a x87.bc tests/hostdiff tests/replay tests/replay-noint128 tests/ops_test \
+	      tests/x87trace tests/bench tests/workloads/libm_ld tests/workloads/fp387
 
-.PHONY: all check check-host clean
+.PHONY: all check check-host check-trace bench clean

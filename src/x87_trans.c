@@ -175,28 +175,6 @@ static bf bf_mul(const bf *a, const bf *b)
     return r;
 }
 
-static bf bf_div_u32(const bf *a, uint32_t d)
-{
-    uint64_t q[4], rem = 0;
-    bf r = *a;
-    int s;
-    if (bf_is_zero(a))
-        return r;
-    for (int i = 2; i >= 0; i--)
-        q[i + 1] = div128(rem, a->m[i], d, &rem);
-    q[0] = div128(rem, 0, d, &rem);
-    s = clz64(q[3]); /* < 32 */
-    if (s) {
-        r.m[2] = (q[3] << s) | (q[2] >> (64 - s));
-        r.m[1] = (q[2] << s) | (q[1] >> (64 - s));
-        r.m[0] = (q[1] << s) | (q[0] >> (64 - s));
-        r.exp -= s;
-    } else {
-        r.m[2] = q[3]; r.m[1] = q[2]; r.m[0] = q[1];
-    }
-    return r;
-}
-
 static const bf BF_ONE = { 0, 0, { 0, 0, 0x8000000000000000ull } };
 static const bf BF_TWO = { 0, 1, { 0, 0, 0x8000000000000000ull } };
 static const bf BF_PI = { 0, 1, { 0x29024E088A67CC74ull, 0xC4C6628B80DC1CD1ull, 0xC90FDAA22168C234ull } };
@@ -207,12 +185,22 @@ static bf bf_div(const bf *a, const bf *b)
 {
     bf x, t;
     uint64_t rem;
+    if (b->m[2] == 0x8000000000000000ull && !(b->m[1] | b->m[0])) {
+        /* power of two: exact */
+        x = *a;
+        if (!bf_is_zero(&x)) {
+            x.exp -= b->exp;
+            x.sign ^= b->sign;
+        }
+        return x;
+    }
     /* initial 64-bit reciprocal estimate: 2^127 / top limb */
     x.sign = b->sign;
     x.exp = -b->exp - 1;
     x.m[2] = b->m[2] == 0x8000000000000000ull ? ~0ull : div128(0x8000000000000000ull, 0, b->m[2], &rem);
     x.m[1] = x.m[0] = 0;
-    for (int i = 0; i < 3; i++) {
+    /* the estimate is good to ~62 bits; each step doubles that */
+    for (int i = 0; i < 2; i++) {
         t = bf_mul(b, &x);
         t = bf_sub(&BF_TWO, &t);
         x = bf_mul(&x, &t);
@@ -257,59 +245,140 @@ static x87_f80 bf_finish(fctx *c, const bf *a)
 /* Kernels                                                             */
 /* ------------------------------------------------------------------ */
 
+#include "x87_tables.h"
+
 #define BF_TERM_BITS 200
+
+/*
+ * Power series, evaluated in 192-bit fixed point.
+ *
+ * All series here have the form P(x) = sum c_k x^k with c_0 = 1, 0 < x < 1
+ * and terms of decreasing magnitude, so every intermediate value of
+ * Horner's rule lies in (0, 2) and plain Q2.190 integers suffice - no
+ * alignment or normalisation per term.
+ */
+
+/* Number of terms needed so that c_n * x^n is below 2^-BF_TERM_BITS, from
+ * an upper bound on log2(x) in 1/128ths. */
+static int series_len(const bf *x, const int16_t *tab_exp, int max)
+{
+    /* log2(1 + f) <= f + 0.09 */
+    int32_t lg128 = x->exp * 128 + (int32_t)(x->m[2] >> 56) - 127 + 12;
+    int n = 1;
+    if (lg128 > -1)
+        lg128 = -1;
+    while (n < max && tab_exp[n] * 128 + n * lg128 > -BF_TERM_BITS * 128)
+        n++;
+    return n;
+}
+
+/* high 192 bits of a (Q2.190) times x (Q0.192); the partial products that
+ * only reach the discarded low half are skipped (error of a few 2^-190) */
+static void fx_mulhi(uint64_t r[3], const uint64_t a[3], const uint64_t x[3])
+{
+    uint64_t h, l, c0, c1, c2, c3 = 0, t;
+    /* weight 2^128: high halves of the i + j == 2 products */
+    (void)mul64(a[0], x[2], &c0);
+    (void)mul64(a[1], x[1], &h); c0 += h; c1 = c0 < h;
+    (void)mul64(a[2], x[0], &h); c0 += h; c1 += c0 < h;
+    /* i + j == 3 */
+    l = mul64(a[1], x[2], &h); c0 += l; t = c0 < l; c1 += h; c2 = c1 < h; c1 += t; c2 += c1 < t;
+    l = mul64(a[2], x[1], &h); c0 += l; t = c0 < l; c1 += h; c2 += c1 < h; c1 += t; c2 += c1 < t;
+    /* i + j == 4 */
+    l = mul64(a[2], x[2], &h); c1 += l; t = c1 < l; c2 += h; c3 += c2 < h; c2 += t;
+    (void)c3;
+    r[0] = c0; r[1] = c1; r[2] = c2;
+}
+
+/* sum_{k=0..n} (alt ? (-1)^k : 1) * c_k * x^k for 0 < x < 1 */
+static bf series(const bf *x, const uint64_t tab[][3], const int16_t *tab_exp, int max, int alt)
+{
+    int n = series_len(x, tab_exp, max);
+    uint64_t fx[3] = { x->m[0], x->m[1], x->m[2] }, acc[3], t[3];
+    bf r;
+
+    shr192(fx, -1 - x->exp); /* x as a Q0.192 fraction */
+    acc[0] = tab[n][0]; acc[1] = tab[n][1]; acc[2] = tab[n][2];
+    for (int k = n - 1; k >= 0; k--) {
+        unsigned carry = 0;
+        fx_mulhi(t, acc, fx);
+        if (alt) {
+            /* c_k - acc * x */
+            for (int i = 0; i < 3; i++) {
+                uint64_t d = tab[k][i] - t[i], u = d - carry;
+                carry = (tab[k][i] < t[i]) | (d < carry);
+                acc[i] = u;
+            }
+        } else {
+            for (int i = 0; i < 3; i++) {
+                uint64_t d = tab[k][i] + t[i], u = d + carry;
+                carry = (d < t[i]) | (u < d);
+                acc[i] = u;
+            }
+        }
+    }
+    r.sign = 0;
+    r.exp = 1; /* Q2.190 */
+    r.m[0] = acc[0]; r.m[1] = acc[1]; r.m[2] = acc[2];
+    bf_normalize(&r);
+    return r;
+}
+
+#define SERIES(x, tab, max, alt) series(x, tab, tab##_EXP, max, alt)
 
 static bf k_sin(const bf *r)
 {
-    bf r2 = bf_mul(r, r), sum = *r, term = *r;
-    for (uint32_t k = 1; k < 64; k++) {
-        term = bf_mul(&term, &r2);
-        term = bf_div_u32(&term, (2 * k) * (2 * k + 1));
-        if (bf_is_zero(&term) || term.exp < sum.exp - BF_TERM_BITS)
-            break;
-        sum = (k & 1) ? bf_sub(&sum, &term) : bf_add(&sum, &term);
-    }
-    return sum;
+    bf r2 = bf_mul(r, r), p = SERIES(&r2, TAB_INVFACT_ODD, 26, 1);
+    return bf_mul(r, &p);
 }
 
 static bf k_cos(const bf *r)
 {
-    bf r2 = bf_mul(r, r), sum = BF_ONE, term = BF_ONE;
-    for (uint32_t k = 1; k < 64; k++) {
-        term = bf_mul(&term, &r2);
-        term = bf_div_u32(&term, (2 * k - 1) * (2 * k));
-        if (bf_is_zero(&term) || term.exp < -BF_TERM_BITS)
-            break;
-        sum = (k & 1) ? bf_sub(&sum, &term) : bf_add(&sum, &term);
-    }
-    return sum;
+    bf r2 = bf_mul(r, r);
+    return SERIES(&r2, TAB_INVFACT_EVEN, 26, 1);
 }
 
 /* atan for 0 <= z <= 1 */
 static bf k_atan(const bf *z)
 {
     static const bf thr = { 0, -2, { 0, 0, 0xD413CCCFE7799211ull } }; /* tan(pi/8) */
-    bf w = *z, w2, sum, pw;
+    bf w = *z, sum;
     int reduce = 0;
     if (bf_is_zero(z))
         return *z;
     if (z->exp > thr.exp || (z->exp == thr.exp && cmp192(z->m, thr.m) > 0)) {
+        /* atan(z) = pi/4 - atan((1 - z) / (1 + z)) */
         bf n = bf_sub(&BF_ONE, z), d = bf_add(&BF_ONE, z);
         w = bf_div(&n, &d);
         reduce = 1;
     }
-    sum = w;
-    if (!bf_is_zero(&w)) {
-        w2 = bf_mul(&w, &w);
-        pw = w;
-        for (uint32_t k = 1; k < 200; k++) {
-            bf t;
-            pw = bf_mul(&pw, &w2);
-            t = bf_div_u32(&pw, 2 * k + 1);
-            if (t.exp < sum.exp - BF_TERM_BITS)
-                break;
-            sum = (k & 1) ? bf_sub(&sum, &t) : bf_add(&sum, &t);
+    /* second reduction: atan(w) = atan(c) + atan((w - c) / (1 + w c)) with
+     * c = k/8 nearest to w, leaving an argument below 1/16 */
+    {
+        static const bf atan_k8[3] = {
+    { 0, -4, { 0x8B3957D95D9AD922ull, 0xC897989F3E888EF7ull, 0xFEADD4D5617B6E32ull } }, /* atan(1/8) */
+    { 0, -3, { 0xAA7FA90388B3836Bull, 0x6DC79EF5F7A217E5ull, 0xFADBAFC96406EB15ull } }, /* atan(2/8) */
+    { 0, -2, { 0x3D843977AE5455CCull, 0x8AA32122DCFE4483ull, 0xB7B0CA0F26F78473ull } }, /* atan(3/8) */
+        };
+        int k = 0;
+        if (w.exp >= -4) {
+            /* round(8 w) for w < 0.4143 */
+            uint64_t w8 = w.m[2] >> (60 - w.exp - 1); /* w * 16, truncated */
+            k = (int)((w8 + 1) >> 1);
         }
+        if (k) {
+            bf c = bf_from_w(0, (uint64_t)k, -3, 0);
+            bf n = bf_sub(&w, &c), d = bf_mul(&w, &c);
+            d = bf_add(&BF_ONE, &d);
+            w = bf_div(&n, &d);
+        }
+        sum = w;
+        if (!bf_is_zero(&w)) {
+            bf w2 = bf_mul(&w, &w), p = SERIES(&w2, TAB_ODD_RECIP, 83, 1);
+            sum = bf_mul(&w, &p);
+        }
+        if (k)
+            sum = bf_add(&atan_k8[k - 1], &sum);
     }
     if (reduce) {
         bf pi4 = bf_scale(BF_PI, -2);
@@ -321,19 +390,13 @@ static bf k_atan(const bf *z)
 /* 2*atanh(t) = ln((1+t)/(1-t)) */
 static bf k_atanh2(const bf *t)
 {
-    bf t2, sum = *t, pw = *t;
+    bf t2, p;
     if (bf_is_zero(t))
         return *t;
     t2 = bf_mul(t, t);
-    for (uint32_t k = 1; k < 400; k++) {
-        bf u;
-        pw = bf_mul(&pw, &t2);
-        u = bf_div_u32(&pw, 2 * k + 1);
-        if (u.exp < sum.exp - BF_TERM_BITS)
-            break;
-        sum = bf_add(&sum, &u);
-    }
-    return bf_scale(sum, 1);
+    p = SERIES(&t2, TAB_ODD_RECIP, 83, 0);
+    p = bf_mul(t, &p);
+    return bf_scale(p, 1);
 }
 
 /* log2 of a positive value */
@@ -357,17 +420,13 @@ static bf k_log2(const bf *x)
 
 static bf k_expm1(const bf *z)
 {
-    bf sum = *z, term = *z;
+    bf az = *z, p;
     if (bf_is_zero(z))
         return *z;
-    for (uint32_t k = 2; k < 200; k++) {
-        term = bf_mul(&term, z);
-        term = bf_div_u32(&term, k);
-        if (term.exp < sum.exp - BF_TERM_BITS)
-            break;
-        sum = bf_add(&sum, &term);
-    }
-    return sum;
+    /* (e^z - 1) / z = sum z^k / (k+1)!, alternating for negative z */
+    az.sign = 0;
+    p = SERIES(&az, TAB_INVFACT, 49, z->sign);
+    return bf_mul(z, &p);
 }
 
 /* ------------------------------------------------------------------ */
@@ -588,6 +647,17 @@ X87_INTERNAL x87_f80 x87i_fpatan(fctx *c, const unp *y, const unp *x)
         if (!x->sign)
             return F80(y->sign << 15, 0);
         return round_signed(c, BF_PI, y->sign);
+    }
+    if (!x->sign && y->exp - x->exp <= ATAN_TINY_EXP) {
+        /* For a tiny ratio and positive x the hardware returns the
+         * quotient y / x itself (rounded to 64 bits, flagged inexact). */
+        fctx q = { (uint16_t)(c->cw | 0x0300), 0, 0, 0 };
+        x87_f80 r = x87i_div(&q, y, x);
+        c->flags |= (q.flags & (UE | OE)) | PE;
+        c->c1 = q.c1;
+        if (!(r.sexp & 0x7FFF) && (c->cw & UE))
+            c->flags |= UE;
+        return r;
     }
     by = bf_from_unp(y); by.sign = 0;
     bx = bf_from_unp(x); bx.sign = 0;
