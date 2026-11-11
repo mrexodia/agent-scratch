@@ -681,6 +681,7 @@ static void do_trig(x87_state *s, int mode)
     x87_f80 r, r2 = F80(0x3FFF, 0x8000000000000000ull);
     int c2 = 0, push = mode >= 2;
 
+    s->sw &= (uint16_t)~X87_SW_C2;
     if (empty(s, 0)) {
         if (stack_fault(s, 0)) {
             set_st(s, 0, F80_DEFAULT_NAN);
@@ -719,8 +720,8 @@ static void do_trig(x87_state *s, int mode)
     set_st(s, 0, r);
     finish(s, &c);
     if (push) {
-        if (a.kind >= K_QNAN)
-            r2 = r;
+        if (mode == 2 && a.kind >= K_INF)
+            r2 = r; /* NaN or invalid: both results are the NaN */
         set_top(s, top(s) + 7);
         set_st(s, 0, r2);
     }

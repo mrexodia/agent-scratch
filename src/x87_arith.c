@@ -120,7 +120,8 @@ unp x87i_from_int(int64_t v)
 
 x87_f80 x87i_invalid(fctx *c)
 {
-    c->ex |= IE;
+    /* an invalid operation pre-empts the denormal operand exception */
+    c->ex = (uint16_t)((c->ex & ~DE) | IE);
     return F80_DEFAULT_NAN;
 }
 
