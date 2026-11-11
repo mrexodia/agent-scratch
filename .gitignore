@@ -222,3 +222,6 @@ __marimo__/
 *.a
 tests/hostdiff
 tests/replay
+tests/replay-noint128
+tests/ops_test
+*.bc

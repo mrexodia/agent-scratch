@@ -16,13 +16,13 @@ static void wr16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v
 static void wr32(uint8_t *p, uint32_t v) { wr16(p, (uint16_t)v); wr16(p + 2, (uint16_t)(v >> 16)); }
 static void wr64(uint8_t *p, uint64_t v) { wr32(p, (uint32_t)v); wr32(p + 4, (uint32_t)(v >> 32)); }
 
-x87_f80 x87_f80_load(const void *p)
+X87_API x87_f80 x87_f80_load(const void *p)
 {
     const uint8_t *b = p;
     return F80(rd16(b + 8), rd64(b));
 }
 
-void x87_f80_store(void *p, x87_f80 v)
+X87_API void x87_f80_store(void *p, x87_f80 v)
 {
     uint8_t *b = p;
     wr64(b, v.mant);
@@ -67,12 +67,6 @@ static inline void set_c1(x87_state *s, int v)
     s->sw = (uint16_t)((s->sw & ~X87_SW_C1) | (v ? X87_SW_C1 : 0));
 }
 
-static inline fctx mkctx(const x87_state *s)
-{
-    fctx c = { s->cw, 0, 0, 0 };
-    return c;
-}
-
 /* Raise a stack fault; returns non-zero if the invalid exception is masked
  * (so the instruction continues with the default response). */
 static int stack_fault(x87_state *s, int overflow)
@@ -83,27 +77,17 @@ static int stack_fault(x87_state *s, int overflow)
     return s->cw & IE;
 }
 
-/* Pre-computation faults (#I, #Z, #D): if one is unmasked the instruction
- * is abandoned with its operands untouched. */
-static int trapped(x87_state *s, const fctx *c)
+/* Commit the outcome of a value-level operation to the status word.
+ * Returns non-zero if the result may be delivered. */
+static int commit(x87_state *s, const x87_env *e)
 {
-    uint16_t pre = c->ex & (IE | ZE | DE);
-    if (pre & ~s->cw) {
-        s->sw |= pre;
-        update_es(s);
-        return 1;
-    }
-    return 0;
-}
-
-static void finish(x87_state *s, const fctx *c)
-{
-    s->sw |= c->ex;
-    set_c1(s, c->c1);
+    s->sw |= e->flags;
+    set_c1(s, e->c1);
     update_es(s);
+    return !e->inhibit;
 }
 
-uint16_t x87_tag_word(const x87_state *s)
+X87_API uint16_t x87_tag_word(const x87_state *s)
 {
     uint16_t tw = 0;
     for (int i = 0; i < 8; i++) {
@@ -136,7 +120,7 @@ static void set_cw(x87_state *s, uint16_t cw)
     update_es(s);
 }
 
-void x87_init(x87_state *s)
+X87_API void x87_init(x87_state *s)
 {
     s->cw = 0x037F;
     s->sw = 0;
@@ -146,8 +130,8 @@ void x87_init(x87_state *s)
     s->fip = s->fdp = 0;
 }
 
-int x87_pending(const x87_state *s) { return (s->sw & X87_SW_ES) != 0; }
-int x87_fwait(const x87_state *s) { return x87_pending(s) ? X87_R_MF : X87_R_OK; }
+X87_API int x87_pending(const x87_state *s) { return (s->sw & X87_SW_ES) != 0; }
+X87_API int x87_fwait(const x87_state *s) { return x87_pending(s) ? X87_R_MF : X87_R_OK; }
 
 /* ------------------------------------------------------------------ */
 /* Environment images                                                  */
@@ -250,7 +234,7 @@ static void load_env(x87_state *s, const uint8_t *p, int fmt)
     }
 }
 
-void x87_fxsave(const x87_state *s, uint8_t *a, int rex_w)
+X87_API void x87_fxsave(const x87_state *s, uint8_t *a, int rex_w)
 {
     wr16(a, s->cw);
     wr16(a + 2, s->sw);
@@ -276,7 +260,7 @@ void x87_fxsave(const x87_state *s, uint8_t *a, int rex_w)
     }
 }
 
-void x87_fxrstor(x87_state *s, const uint8_t *a, int rex_w)
+X87_API void x87_fxrstor(x87_state *s, const uint8_t *a, int rex_w)
 {
     s->sw = rd16(a + 2);
     s->valid = a[4];
@@ -296,28 +280,20 @@ void x87_fxrstor(x87_state *s, const uint8_t *a, int rex_w)
     set_cw(s, rd16(a));
 }
 
-uint64_t x87_mmx_read(const x87_state *s, int reg) { return s->r[reg & 7].mant; }
+X87_API uint64_t x87_mmx_read(const x87_state *s, int reg) { return s->r[reg & 7].mant; }
 
-void x87_mmx_write(x87_state *s, int reg, uint64_t value)
+X87_API void x87_mmx_write(x87_state *s, int reg, uint64_t value)
 {
     s->r[reg & 7] = F80(0xFFFF, value);
     s->valid = 0xFF;
     set_top(s, 0);
 }
 
-void x87_emms(x87_state *s) { s->valid = 0; }
+X87_API void x87_emms(x87_state *s) { s->valid = 0; }
 
 /* ------------------------------------------------------------------ */
 /* Instruction bodies                                                  */
 /* ------------------------------------------------------------------ */
-
-/* An operand passed through unchanged; pseudo-denormals come out normalised. */
-static x87_f80 passthru(x87_f80 v)
-{
-    if (!(v.sexp & 0x7FFF) && (v.mant >> 63))
-        v.sexp |= 1;
-    return v;
-}
 
 /* Push v; handles stack overflow. */
 static void push_value(x87_state *s, x87_f80 v)
@@ -343,471 +319,223 @@ static void underflow_to(x87_state *s, unsigned dst, int npop)
     }
 }
 
-static void do_arith(x87_state *s, int fn, const unp *b, int b_empty, unsigned dst, int npop)
+/* Stack fault on an instruction that replaces ST(0) and pushes. */
+static void fault_push2(x87_state *s, int overflow)
 {
-    fctx c = mkctx(s);
-    unp a;
+    if (stack_fault(s, overflow)) {
+        set_st(s, 0, F80_DEFAULT_NAN);
+        set_top(s, top(s) + 7);
+        set_st(s, 0, F80_DEFAULT_NAN);
+    }
+}
+
+static void do_arith(x87_state *s, int fn, const x87_operand *b, int b_empty, unsigned dst, int npop)
+{
+    x87_env e = { s->cw, 0, 0, 0 };
+    x87_operand a;
     x87_f80 r;
 
     if (empty(s, 0) || b_empty) {
         underflow_to(s, dst, npop);
         return;
     }
-    a = x87i_unpack(*ST(s, 0));
+    a = x87_operand_f80(*ST(s, 0));
     switch (fn) {
-    case 0:  r = x87i_add(&c, &a, b, 0); break;
-    case 1:  r = x87i_mul(&c, &a, b); break;
-    case 4:  r = x87i_add(&c, &a, b, 1); break;
-    case 5:  r = x87i_add(&c, b, &a, 1); break;
-    case 6:  r = x87i_div(&c, &a, b); break;
-    default: r = x87i_div(&c, b, &a); break;
+    case 0:  r = x87_add(&a, b, &e); break;
+    case 1:  r = x87_mul(&a, b, &e); break;
+    case 4:  r = x87_sub(&a, b, &e); break;
+    case 5:  r = x87_sub(b, &a, &e); break;
+    case 6:  r = x87_div(&a, b, &e); break;
+    default: r = x87_div(b, &a, &e); break;
     }
-    if (trapped(s, &c)) {
-        set_c1(s, 0);
+    if (!commit(s, &e))
         return;
-    }
     set_st(s, dst, r);
-    finish(s, &c);
     if (npop)
         pop(s);
 }
 
 /* flags: bit0 quiet (FUCOM), bit1 result to EFLAGS */
-static void do_compare(x87_state *s, const unp *b, int b_empty, int flags, int npop, x87_insn *in)
+static void do_compare(x87_state *s, const x87_operand *b, int b_empty, int flags, int npop, x87_insn *in)
 {
-    fctx c = mkctx(s);
-    int r = 3;
+    x87_env e = { s->cw, 0, 0, 0 };
+    int r = X87_CMP_UN;
     static const uint16_t cc[4] = { X87_SW_C3, 0, X87_SW_C0, X87_SW_C3 | X87_SW_C2 | X87_SW_C0 };
     static const uint32_t ef[4] = { 0x40, 0, 0x01, 0x45 };
 
     if (empty(s, 0) || b_empty) {
         s->sw |= IE | SF;
         set_c1(s, 0);
-        c.ex = IE;
+        e.inhibit = !(s->cw & IE);
     } else {
-        unp a = x87i_unpack(*ST(s, 0));
-        r = x87i_cmp(&c, &a, b, flags & 1);
-        s->sw |= c.ex;
+        x87_operand a = x87_operand_f80(*ST(s, 0));
+        r = x87_cmp(&a, b, flags & 1, &e);
+        s->sw |= e.flags;
         if (!(flags & 2))
-            set_c1(s, 0);
+            set_c1(s, 0); /* F[U]COMI[P] leave C1 alone */
     }
     update_es(s);
     if (flags & 2)
         in->eflags = (in->eflags & ~0x8D5u) | ef[r];
     else
         s->sw = (uint16_t)((s->sw & ~(X87_SW_C0 | X87_SW_C2 | X87_SW_C3)) | cc[r]);
-    if (c.ex & ~s->cw & (IE | DE))
+    if (e.inhibit)
         return;
     while (npop--)
         pop(s);
 }
 
-static void do_load(x87_state *s, const unp *v)
+/* FLD m32real / m64real */
+static void do_load(x87_state *s, x87_f80 v, const x87_env *e)
 {
-    fctx c = mkctx(s);
-    x87_f80 r;
     if (!empty(s, 7)) {
         push_value(s, F80_DEFAULT_NAN);
         return;
     }
-    if (v->kind >= K_QNAN) {
-        r = x87i_nan1(&c, v);
-    } else if (v->kind == K_INF) {
-        r = F80((v->sign << 15) | 0x7FFF, 0x8000000000000000ull);
-    } else if (v->kind == K_ZERO) {
-        r = F80(v->sign << 15, 0);
-    } else {
-        if (v->kind == K_DEN)
-            c.ex |= DE;
-        r = F80((v->sign << 15) | v->exp, v->sig);
-    }
-    /* an unmasked #D does not prevent the load */
-    if (c.ex & ~s->cw & IE) {
-        s->sw |= IE;
-        set_c1(s, 0);
-        update_es(s);
-        return;
-    }
-    s->sw |= c.ex;
-    update_es(s);
-    push_value(s, r);
+    if (commit(s, e))
+        push_value(s, v);
 }
 
 static void do_fprem(x87_state *s, int ieee)
 {
-    fctx c = mkctx(s);
-    unp a, b;
+    x87_env e = { s->cw, 0, 0, 0 };
+    uint16_t cc, mask;
     x87_f80 r;
-    uint64_t q = 0;
-    int partial = 0, special = 0;
 
     if (empty(s, 0) || empty(s, 1)) {
         s->sw &= (uint16_t)~X87_SW_C2;
         underflow_to(s, 0, 0);
         return;
     }
-    a = x87i_unpack(*ST(s, 0));
-    b = x87i_unpack(*ST(s, 1));
-    if (a.kind >= K_QNAN || b.kind >= K_QNAN) {
-        r = x87i_nan2(&c, &a, &b);
-        special = 1;
-    } else if (a.kind == K_INF || b.kind == K_ZERO) {
-        r = x87i_invalid(&c);
-        special = 1;
-    } else {
-        if (a.kind == K_DEN || b.kind == K_DEN)
-            c.ex |= DE;
-        if (a.kind == K_ZERO || b.kind == K_INF) {
-            r = passthru(*ST(s, 0));
-        } else {
-            int32_t d = a.exp - b.exp, rexp = b.exp;
-            int sign = a.sign;
-            uint64_t rem;
-            if (d < -1 || (d == -1 && !ieee)) {
-                rem = a.sig;
-                rexp = a.exp;
-            } else if (d == -1) {
-                /* FPREM1 with |b|/2 <= |a| < |b|: the quotient rounds to 1
-                 * when |a| > |b|/2, giving r = a - b */
-                rem = a.sig;
-                rexp = a.exp;
-                if (a.sig > b.sig) {
-                    rem = (uint64_t)(((u128)b.sig << 1) - a.sig);
-                    q = 1;
-                    sign ^= 1;
-                }
-            } else if (d < 64) {
-                u128 n = (u128)a.sig << d;
-                u128 qq = n / b.sig;
-                rem = (uint64_t)(n % b.sig);
-                q = (uint64_t)qq;
-                if (ieee) {
-                    u128 twice = (u128)rem << 1;
-                    if (twice > b.sig || (twice == b.sig && (q & 1))) {
-                        rem = b.sig - rem;
-                        q++;
-                        sign ^= 1;
-                    }
-                }
-            } else {
-                int n = 32 + (d & 31);
-                u128 num = (u128)a.sig << n;
-                rem = (uint64_t)(num % b.sig);
-                q = (uint64_t)(num / b.sig);
-                rexp = b.exp + (d - n);
-                partial = 1;
-            }
-            if (!rem) {
-                r = F80(a.sign << 15, 0);
-            } else {
-                int sh = clz64(rem);
-                r = x87i_round_pack_prec(&c, sign, rexp - sh, rem << sh, 0, 64);
-            }
-        }
-    }
-    if (special) {
-        /* NaN / invalid: C0 and C3 are left alone */
-        s->sw &= (uint16_t)~(X87_SW_C1 | X87_SW_C2);
-        if (trapped(s, &c))
-            return;
-        set_st(s, 0, r);
-        s->sw |= c.ex;
-        update_es(s);
-        return;
-    }
-    if (trapped(s, &c)) {
-        s->sw &= (uint16_t)~(X87_SW_C1 | X87_SW_C2);
-        return;
-    }
-    set_st(s, 0, r);
-    s->sw |= c.ex;
-    s->sw &= (uint16_t)~CC_MASK;
-    if (partial) {
-        s->sw |= X87_SW_C2;
-    } else {
-        if (q & 4) s->sw |= X87_SW_C0;
-        if (q & 2) s->sw |= X87_SW_C3;
-        if (q & 1) s->sw |= X87_SW_C1;
-    }
+    r = x87_prem(*ST(s, 0), *ST(s, 1), ieee, &e, &cc, &mask);
+    s->sw = (uint16_t)((s->sw & ~mask) | cc | e.flags);
     update_es(s);
+    if (!e.inhibit)
+        set_st(s, 0, r);
 }
 
 static void do_fscale(x87_state *s)
 {
-    fctx c = mkctx(s);
-    unp a, b;
+    x87_env e = { s->cw, 0, 0, 0 };
     x87_f80 r;
-
     if (empty(s, 0) || empty(s, 1)) {
         underflow_to(s, 0, 0);
         return;
     }
-    a = x87i_unpack(*ST(s, 0));
-    b = x87i_unpack(*ST(s, 1));
-    if (a.kind >= K_QNAN || b.kind >= K_QNAN) {
-        r = x87i_nan2(&c, &a, &b);
-    } else if (b.kind == K_INF) {
-        if (b.sign ? a.kind == K_INF : a.kind == K_ZERO) {
-            r = x87i_invalid(&c);
-        } else {
-            if (a.kind == K_DEN)
-                c.ex |= DE;
-            r = b.sign ? F80(a.sign << 15, 0) : F80((a.sign << 15) | 0x7FFF, 0x8000000000000000ull);
-        }
-    } else {
-        if (a.kind == K_DEN || b.kind == K_DEN)
-            c.ex |= DE;
-        if (a.kind == K_INF || a.kind == K_ZERO) {
-            r = *ST(s, 0);
-        } else {
-            int32_t n = 0;
-            if (b.kind != K_ZERO) {
-                int32_t e = b.exp - 16383;
-                if (e >= 17)
-                    n = 0x10000 * 2;
-                else if (e >= 0)
-                    n = (int32_t)(b.sig >> (63 - e));
-                if (b.sign)
-                    n = -n;
-            }
-            /* With the exception unmasked and a result that stays out of
-             * range even after the bias adjustment, the hardware delivers
-             * a true zero / infinity irrespective of the rounding mode. */
-            if (b.kind == K_ZERO) {
-                r = passthru(*ST(s, 0)); /* scaling by zero returns the operand as is */
-            } else if (!(s->cw & UE) && a.exp + n + 24576 <= 0) {
-                c.ex |= UE | PE;
-                r = F80(a.sign << 15, 0);
-            } else if (!(s->cw & OE) && a.exp + n - 24576 >= 0x7FFF) {
-                c.ex |= OE | PE;
-                c.c1 = 1;
-                r = F80((a.sign << 15) | 0x7FFF, 0x8000000000000000ull);
-            } else {
-                r = x87i_round_pack_prec(&c, a.sign, a.exp + n, a.sig, 0, 64);
-            }
-        }
-    }
-    if (trapped(s, &c)) {
-        set_c1(s, 0);
-        return;
-    }
-    set_st(s, 0, r);
-    finish(s, &c);
+    r = x87_scale(*ST(s, 0), *ST(s, 1), &e);
+    if (commit(s, &e))
+        set_st(s, 0, r);
 }
 
 static void do_fxtract(x87_state *s)
 {
-    fctx c = mkctx(s);
-    unp a;
+    x87_env e = { s->cw, 0, 0, 0 };
     x87_f80 sig, ex;
 
     if (empty(s, 0)) {
-        if (stack_fault(s, 0)) {
-            set_st(s, 0, F80_DEFAULT_NAN);
-            set_top(s, top(s) + 7);
-            set_st(s, 0, F80_DEFAULT_NAN);
-        }
+        fault_push2(s, 0);
         return;
     }
     if (!empty(s, 7)) {
-        if (stack_fault(s, 1)) {
-            set_st(s, 0, F80_DEFAULT_NAN);
-            set_top(s, top(s) + 7);
-            set_st(s, 0, F80_DEFAULT_NAN);
-        }
+        fault_push2(s, 1);
         return;
     }
-    a = x87i_unpack(*ST(s, 0));
-    if (a.kind >= K_QNAN) {
-        sig = ex = x87i_nan1(&c, &a);
-    } else if (a.kind == K_INF) {
-        sig = *ST(s, 0);
-        ex = F80(0x7FFF, 0x8000000000000000ull);
-    } else if (a.kind == K_ZERO) {
-        c.ex |= ZE;
-        sig = *ST(s, 0);
-        ex = F80(0xFFFF, 0x8000000000000000ull);
-    } else {
-        unp e = x87i_from_int(a.exp - 16383);
-        if (a.kind == K_DEN)
-            c.ex |= DE;
-        sig = F80((a.sign << 15) | 0x3FFF, a.sig);
-        ex = e.kind == K_ZERO ? F80(0, 0) : F80((e.sign << 15) | e.exp, e.sig);
-    }
-    if (trapped(s, &c)) {
-        set_c1(s, 0);
+    ex = x87_xtract(*ST(s, 0), &sig, &e);
+    if (!commit(s, &e))
         return;
-    }
-    s->sw |= c.ex;
-    set_c1(s, 0);
-    update_es(s);
     set_st(s, 0, ex);
     set_top(s, top(s) + 7);
     set_st(s, 0, sig);
 }
 
 /* Unary operation on ST(0) with the usual exception protocol. */
-typedef x87_f80 (*unary_fn)(fctx *, const unp *);
+typedef x87_f80 (*unary_fn)(x87_f80, x87_env *);
 
 static void do_unary(x87_state *s, unary_fn fn)
 {
-    fctx c = mkctx(s);
-    unp a;
+    x87_env e = { s->cw, 0, 0, 0 };
     x87_f80 r;
     if (empty(s, 0)) {
         underflow_to(s, 0, 0);
         return;
     }
-    a = x87i_unpack(*ST(s, 0));
-    r = fn(&c, &a);
-    if (trapped(s, &c)) {
-        set_c1(s, 0);
-        return;
-    }
-    set_st(s, 0, r);
-    finish(s, &c);
+    r = fn(*ST(s, 0), &e);
+    if (commit(s, &e))
+        set_st(s, 0, r);
 }
 
 /* FSIN / FCOS / FPTAN / FSINCOS: mode 0 sin, 1 cos, 2 tan, 3 sincos */
 static void do_trig(x87_state *s, int mode)
 {
-    fctx c = mkctx(s);
-    unp a;
-    x87_f80 r, r2 = F80(0x3FFF, 0x8000000000000000ull);
+    x87_env e = { s->cw, 0, 0, 0 };
+    x87_f80 a, r, r2 = F80(0, 0);
     int c2 = 0, push = mode >= 2;
 
     s->sw &= (uint16_t)~X87_SW_C2;
     if (empty(s, 0)) {
-        if (stack_fault(s, 0)) {
-            set_st(s, 0, F80_DEFAULT_NAN);
-            if (push) {
-                set_top(s, top(s) + 7);
-                set_st(s, 0, F80_DEFAULT_NAN);
-            }
-        }
+        if (push)
+            fault_push2(s, 0);
+        else
+            underflow_to(s, 0, 0);
         return;
     }
     if (push && !empty(s, 7)) {
-        if (stack_fault(s, 1)) {
-            set_st(s, 0, F80_DEFAULT_NAN);
-            set_top(s, top(s) + 7);
-            set_st(s, 0, F80_DEFAULT_NAN);
-        }
+        fault_push2(s, 1);
         return;
     }
-    a = x87i_unpack(*ST(s, 0));
+    a = *ST(s, 0);
     switch (mode) {
-    case 0:  r = x87i_fsin(&c, &a, &c2); break;
-    case 1:  r = x87i_fcos(&c, &a, &c2); break;
-    case 2:  r = x87i_fptan(&c, &a, &c2); break;
-    default: x87i_fsincos(&c, &a, &r, &r2, &c2); break;
+    case 0:  r = x87_sin(a, &e, &c2); break;
+    case 1:  r = x87_cos(a, &e, &c2); break;
+    case 2:  r = x87_tan(a, &r2, &e, &c2); break;
+    default: r = x87_sincos(a, &r2, &e, &c2); break;
     }
     if (c2) {
         s->sw |= X87_SW_C2;
         set_c1(s, 0);
         return;
     }
-    s->sw &= (uint16_t)~X87_SW_C2;
-    if (trapped(s, &c)) {
-        set_c1(s, 0);
+    if (!commit(s, &e))
         return;
-    }
     set_st(s, 0, r);
-    finish(s, &c);
     if (push) {
-        if (mode == 2 && a.kind >= K_INF)
-            r2 = r; /* NaN or invalid: both results are the NaN */
         set_top(s, top(s) + 7);
         set_st(s, 0, r2);
     }
 }
 
 /* FPATAN / FYL2X / FYL2XP1: ST(1) = f(ST(1), ST(0)); pop */
-typedef x87_f80 (*binary_fn)(fctx *, const unp *, const unp *);
+typedef x87_f80 (*binary_fn)(x87_f80, x87_f80, x87_env *);
 
 static void do_binary_pop(x87_state *s, binary_fn fn)
 {
-    fctx c = mkctx(s);
-    unp x, y;
+    x87_env e = { s->cw, 0, 0, 0 };
     x87_f80 r;
     if (empty(s, 0) || empty(s, 1)) {
         underflow_to(s, 1, 1);
         return;
     }
-    x = x87i_unpack(*ST(s, 0));
-    y = x87i_unpack(*ST(s, 1));
-    r = fn(&c, &y, &x);
-    if (trapped(s, &c)) {
-        set_c1(s, 0);
+    r = fn(*ST(s, 1), *ST(s, 0), &e);
+    if (!commit(s, &e))
         return;
-    }
     set_st(s, 1, r);
-    finish(s, &c);
     pop(s);
-}
-
-static void do_const(x87_state *s, int which)
-{
-    /* 66-bit internal constants, rounded according to RC */
-    static const struct { uint16_t e; uint64_t hi, lo; } k[7] = {
-        { 0x3FFF, 0x8000000000000000ull, 0 },                     /* 1.0 */
-        { 0x4000, 0xD49A784BCD1B8AFEull, 0x4000000000000000ull }, /* log2(10) */
-        { 0x3FFF, 0xB8AA3B295C17F0BBull, 0xC000000000000000ull }, /* log2(e) */
-        { 0x4000, 0xC90FDAA22168C234ull, 0xC000000000000000ull }, /* pi */
-        { 0x3FFD, 0x9A209A84FBCFF798ull, 0x8000000000000001ull }, /* log10(2) */
-        { 0x3FFE, 0xB17217F7D1CF79ABull, 0xC000000000000000ull }, /* ln(2) */
-        { 0x0000, 0, 0 },                                         /* 0.0 */
-    };
-    fctx c = mkctx(s);
-    x87_f80 v;
-    if (which == 6)
-        v = F80(0, 0);
-    else
-        v = x87i_round_pack_prec(&c, 0, k[which].e, k[which].hi, k[which].lo, 64);
-    push_value(s, v);
 }
 
 static void do_fxam(x87_state *s)
 {
-    x87_f80 v = *ST(s, 0);
-    unp a = x87i_unpack(v);
-    uint16_t cc;
-    if (empty(s, 0)) {
-        cc = X87_SW_C3 | X87_SW_C0;
-    } else {
-        switch (a.kind) {
-        case K_ZERO: cc = X87_SW_C3; break;
-        case K_DEN:  cc = X87_SW_C3 | X87_SW_C2; break;
-        case K_NORM: cc = X87_SW_C2; break;
-        case K_INF:  cc = X87_SW_C2 | X87_SW_C0; break;
-        case K_QNAN:
-        case K_SNAN: cc = X87_SW_C0; break;
-        default:     cc = 0; break;
-        }
-    }
-    if (v.sexp & 0x8000)
+    uint16_t cc = empty(s, 0) ? (X87_SW_C3 | X87_SW_C0) : x87_xam(*ST(s, 0));
+    if (ST(s, 0)->sexp & 0x8000)
         cc |= X87_SW_C1;
     s->sw = (uint16_t)((s->sw & ~CC_MASK) | cc);
-}
-
-static x87_f80 bcd_load(const uint8_t *p)
-{
-    uint64_t v = 0;
-    unp u;
-    for (int i = 8; i >= 0; i--)
-        v = v * 100 + (uint64_t)(p[i] >> 4) * 10 + (p[i] & 15);
-    u = x87i_from_int((int64_t)v);
-    if (u.kind == K_ZERO)
-        return F80((p[9] & 0x80) << 8, 0);
-    return F80(((p[9] & 0x80) << 8) | u.exp, u.sig);
 }
 
 /* Store ST(0) to memory. kind: 0 m32, 1 m64, 2 m80, 3 i16, 4 i32, 5 i64, 6 bcd; */
 static int do_store(x87_state *s, int kind, int trunc, int npop, uint8_t *mem)
 {
-    fctx c = mkctx(s);
+    static const uint8_t ibits[3] = { 16, 32, 64 };
+    x87_env e = { s->cw, 0, 0, 0 };
     x87_f80 v;
-    unp a;
     uint64_t out = 0;
     uint8_t bcd[10];
 
@@ -831,46 +559,15 @@ static int do_store(x87_state *s, int kind, int trunc, int npop, uint8_t *mem)
         return X87_R_MEM_WRITE;
     }
     v = *ST(s, 0);
-    a = x87i_unpack(v);
     switch (kind) {
-    case 0: out = x87i_to_f32(&c, v); break;
-    case 1: out = x87i_to_f64(&c, v); break;
+    case 0: out = x87_to_f32(v, &e); break;
+    case 1: out = x87_to_f64(v, &e); break;
     case 2: break;
-    case 3: out = (uint64_t)x87i_to_int(&c, &a, 16, trunc); break;
-    case 4: out = (uint64_t)x87i_to_int(&c, &a, 32, trunc); break;
-    case 5: out = (uint64_t)x87i_to_int(&c, &a, 64, trunc); break;
-    default: {
-        uint64_t mag = 0;
-        int inexact = 0, up = 0;
-        if (a.kind >= K_INF || x87i_round_mag(ctx_rc(&c), &a, &mag, &inexact, &up) ||
-            mag > 999999999999999999ull) {
-            c.ex |= IE;
-            wr64(bcd, 0xC000000000000000ull);
-            bcd[8] = bcd[9] = 0xFF;
-        } else {
-            if (inexact)
-                c.ex |= PE;
-            c.c1 = up;
-            for (int i = 0; i < 9; i++) {
-                unsigned d = (unsigned)(mag % 100);
-                mag /= 100;
-                bcd[i] = (uint8_t)(((d / 10) << 4) | (d % 10));
-            }
-            bcd[9] = a.sign ? 0x80 : 0;
-        }
-        break;
+    case 6: x87_to_bcd(v, bcd, &e); break;
+    default: out = (uint64_t)x87_to_int(v, ibits[kind - 3], trunc, &e); break;
     }
-    }
-    if (trapped(s, &c)) {
-        set_c1(s, 0);
+    if (!commit(s, &e))
         return 0;
-    }
-    if (c.abort) {
-        s->sw |= c.ex;
-        set_c1(s, 0);
-        update_es(s);
-        return 0;
-    }
     switch (kind) {
     case 0: wr32(mem, (uint32_t)out); break;
     case 1: wr64(mem, out); break;
@@ -883,7 +580,6 @@ static int do_store(x87_state *s, int kind, int trunc, int npop, uint8_t *mem)
             mem[i] = bcd[i];
         break;
     }
-    finish(s, &c);
     if (npop)
         pop(s);
     return X87_R_MEM_WRITE;
@@ -948,7 +644,7 @@ static void do_sign(x87_state *s, int chs)
 /* Decoder                                                             */
 /* ------------------------------------------------------------------ */
 
-size_t x87_mem_operand(uint8_t op, uint8_t modrm, int env_fmt, int *access)
+X87_API size_t x87_mem_operand(uint8_t op, uint8_t modrm, int env_fmt, int *access)
 {
     static const uint8_t arith_sz[8] = { 4, 0, 4, 0, 8, 0, 2, 0 };
     unsigned reg = (modrm >> 3) & 7;
@@ -1066,15 +762,16 @@ static int exec_mem(x87_state *s, x87_insn *in)
 {
     uint8_t *m = in->mem;
     unsigned reg = (in->modrm >> 3) & 7;
-    unp b;
+    x87_operand b;
+    x87_env e = { s->cw, 0, 0, 0 };
 
     if (!(in->op & 1)) {
         /* D8/DA/DC/DE: arithmetic with m32real/m32int/m64real/m16int */
         switch (in->op) {
-        case 0xD8: b = x87i_from_f32(rd32(m)); break;
-        case 0xDA: b = x87i_from_int((int32_t)rd32(m)); break;
-        case 0xDC: b = x87i_from_f64(rd64(m)); break;
-        default:   b = x87i_from_int((int16_t)rd16(m)); break;
+        case 0xD8: b = x87_operand_f32(rd32(m)); break;
+        case 0xDA: b = x87_operand_int((int32_t)rd32(m)); break;
+        case 0xDC: b = x87_operand_f64(rd64(m)); break;
+        default:   b = x87_operand_int((int16_t)rd16(m)); break;
         }
         if (reg == 2 || reg == 3)
             do_compare(s, &b, 0, 0, reg == 3, in);
@@ -1085,7 +782,7 @@ static int exec_mem(x87_state *s, x87_insn *in)
     switch (in->op) {
     case 0xD9:
         switch (reg) {
-        case 0: b = x87i_from_f32(rd32(m)); do_load(s, &b); return 0;
+        case 0: { x87_f80 v = x87_from_f32(rd32(m), &e); do_load(s, v, &e); return 0; }
         case 2: return do_store(s, 0, 0, 0, m);
         case 3: return do_store(s, 0, 0, 1, m);
         case 4: load_env(s, m, in->env_fmt); return 0;
@@ -1109,7 +806,7 @@ static int exec_mem(x87_state *s, x87_insn *in)
         break;
     case 0xDD:
         switch (reg) {
-        case 0: b = x87i_from_f64(rd64(m)); do_load(s, &b); return 0;
+        case 0: { x87_f80 v = x87_from_f64(rd64(m), &e); do_load(s, v, &e); return 0; }
         case 1: return do_store(s, 5, 1, 1, m);
         case 2: return do_store(s, 1, 0, 0, m);
         case 3: return do_store(s, 1, 0, 1, m);
@@ -1136,7 +833,7 @@ static int exec_mem(x87_state *s, x87_insn *in)
         case 1: return do_store(s, 3, 1, 1, m);
         case 2: return do_store(s, 3, 0, 0, m);
         case 3: return do_store(s, 3, 0, 1, m);
-        case 4: push_value(s, bcd_load(m)); return 0;
+        case 4: push_value(s, x87_from_bcd(m)); return 0;
         case 5: break;
         case 6: return do_store(s, 6, 0, 1, m);
         default: return do_store(s, 5, 0, 1, m);
@@ -1146,8 +843,7 @@ static int exec_mem(x87_state *s, x87_insn *in)
     /* FILD m16/m32/m64 */
     {
         int64_t v = in->op == 0xDB ? (int32_t)rd32(m) : reg == 0 ? (int16_t)rd16(m) : (int64_t)rd64(m);
-        unp u = x87i_from_int(v);
-        push_value(s, u.kind == K_ZERO ? F80(0, 0) : F80((u.sign << 15) | u.exp, u.sig));
+        push_value(s, x87_from_int(v));
     }
     return 0;
 }
@@ -1155,7 +851,7 @@ static int exec_mem(x87_state *s, x87_insn *in)
 static int exec_reg(x87_state *s, x87_insn *in)
 {
     unsigned reg = (in->modrm >> 3) & 7, i = in->modrm & 7;
-    unp b = x87i_unpack(*ST(s, i));
+    x87_operand b = x87_operand_f80(*ST(s, i));
     int be = empty(s, i);
     uint32_t ef = in->eflags;
 
@@ -1207,27 +903,27 @@ static int exec_reg(x87_state *s, x87_insn *in)
         case 0xE0: do_sign(s, 1); break;
         case 0xE1: do_sign(s, 0); break;
         case 0xE4: {
-            unp z = { K_ZERO, 0, 0, 0 };
+            x87_operand z = x87_operand_int(0);
             do_compare(s, &z, 0, 0, 0, in);
             break;
         }
         case 0xE5: do_fxam(s); break;
         case 0xE8: case 0xE9: case 0xEA: case 0xEB: case 0xEC: case 0xED: case 0xEE:
-            do_const(s, in->modrm - 0xE8);
+            push_value(s, x87_const(in->modrm - 0xE8, s->cw));
             break;
-        case 0xF0: do_unary(s, x87i_f2xm1); break;
-        case 0xF1: do_binary_pop(s, x87i_fyl2x); break;
+        case 0xF0: do_unary(s, x87_2xm1); break;
+        case 0xF1: do_binary_pop(s, x87_yl2x); break;
         case 0xF2: do_trig(s, 2); break;
-        case 0xF3: do_binary_pop(s, x87i_fpatan); break;
+        case 0xF3: do_binary_pop(s, x87_atan2); break;
         case 0xF4: do_fxtract(s); break;
         case 0xF5: do_fprem(s, 1); break;
         case 0xF6: set_top(s, top(s) + 7); set_c1(s, 0); break;
         case 0xF7: set_top(s, top(s) + 1); set_c1(s, 0); break;
         case 0xF8: do_fprem(s, 0); break;
-        case 0xF9: do_binary_pop(s, x87i_fyl2xp1); break;
-        case 0xFA: do_unary(s, x87i_sqrt); break;
+        case 0xF9: do_binary_pop(s, x87_yl2xp1); break;
+        case 0xFA: do_unary(s, x87_sqrt); break;
         case 0xFB: do_trig(s, 3); break;
-        case 0xFC: do_unary(s, x87i_rndint); break;
+        case 0xFC: do_unary(s, x87_rndint); break;
         case 0xFD: do_fscale(s); break;
         case 0xFE: do_trig(s, 0); break;
         default:   do_trig(s, 1); break;
@@ -1235,7 +931,7 @@ static int exec_reg(x87_state *s, x87_insn *in)
         return 0;
     case 0xDA:
         if (reg == 5) {
-            b = x87i_unpack(*ST(s, 1));
+            b = x87_operand_f80(*ST(s, 1));
             do_compare(s, &b, empty(s, 1), 1, 2, in);
             return 0;
         }
@@ -1281,7 +977,7 @@ static int exec_reg(x87_state *s, x87_insn *in)
     }
 }
 
-int x87_exec(x87_state *s, x87_insn *in)
+X87_API int x87_exec(x87_state *s, x87_insn *in)
 {
     int cl, r;
 

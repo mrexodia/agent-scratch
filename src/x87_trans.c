@@ -45,14 +45,14 @@ static void bf_normalize(bf *a)
     }
 }
 
-/* v * 2^e2 */
-static bf bf_from_u128(u128 v, int32_t e2, int sign)
+/* (hi:lo) * 2^e2 */
+static bf bf_from_w(uint64_t hi, uint64_t lo, int32_t e2, int sign)
 {
     bf r;
     r.sign = sign;
     r.m[2] = 0;
-    r.m[1] = (uint64_t)(v >> 64);
-    r.m[0] = (uint64_t)v;
+    r.m[1] = hi;
+    r.m[0] = lo;
     r.exp = e2 + 191;
     bf_normalize(&r);
     return r;
@@ -105,24 +105,24 @@ static bf bf_add(const bf *a, const bf *b)
         return x;
     shr192(y.m, d);
     if (x.sign == y.sign) {
-        u128 t = (u128)x.m[0] + y.m[0];
-        x.m[0] = (uint64_t)t;
-        t = (u128)x.m[1] + y.m[1] + (uint64_t)(t >> 64);
-        x.m[1] = (uint64_t)t;
-        t = (u128)x.m[2] + y.m[2] + (uint64_t)(t >> 64);
-        x.m[2] = (uint64_t)t;
-        if (t >> 64) {
+        unsigned carry = 0;
+        for (int i = 0; i < 3; i++) {
+            uint64_t t = x.m[i] + y.m[i], u = t + carry;
+            carry = (t < x.m[i]) | (u < t);
+            x.m[i] = u;
+        }
+        if (carry) {
             shr192(x.m, 1);
             x.m[2] |= 0x8000000000000000ull;
             x.exp++;
         }
     } else {
-        u128 t = (u128)x.m[0] - y.m[0];
-        x.m[0] = (uint64_t)t;
-        t = (u128)x.m[1] - y.m[1] - (uint64_t)((t >> 64) & 1);
-        x.m[1] = (uint64_t)t;
-        t = (u128)x.m[2] - y.m[2] - (uint64_t)((t >> 64) & 1);
-        x.m[2] = (uint64_t)t;
+        unsigned borrow = 0;
+        for (int i = 0; i < 3; i++) {
+            uint64_t t = x.m[i] - y.m[i], u = t - borrow;
+            borrow = (x.m[i] < y.m[i]) | (t < borrow);
+            x.m[i] = u;
+        }
         bf_normalize(&x);
     }
     return x;
@@ -152,9 +152,13 @@ static bf bf_mul(const bf *a, const bf *b)
     for (int i = 0; i < 3; i++) {
         uint64_t carry = 0;
         for (int j = 0; j < 3; j++) {
-            u128 t = (u128)a->m[i] * b->m[j] + p[i + j] + carry;
-            p[i + j] = (uint64_t)t;
-            carry = (uint64_t)(t >> 64);
+            uint64_t hi, lo = mul64(a->m[i], b->m[j], &hi);
+            lo += p[i + j];
+            hi += lo < p[i + j];
+            lo += carry;
+            hi += lo < carry;
+            p[i + j] = lo;
+            carry = hi;
         }
         p[i + 3] = carry;
     }
@@ -178,12 +182,9 @@ static bf bf_div_u32(const bf *a, uint32_t d)
     int s;
     if (bf_is_zero(a))
         return r;
-    for (int i = 2; i >= 0; i--) {
-        u128 cur = ((u128)rem << 64) | a->m[i];
-        q[i + 1] = (uint64_t)(cur / d);
-        rem = (uint64_t)(cur % d);
-    }
-    q[0] = (uint64_t)(((u128)rem << 64) / d);
+    for (int i = 2; i >= 0; i--)
+        q[i + 1] = div128(rem, a->m[i], d, &rem);
+    q[0] = div128(rem, 0, d, &rem);
     s = clz64(q[3]); /* < 32 */
     if (s) {
         r.m[2] = (q[3] << s) | (q[2] >> (64 - s));
@@ -205,10 +206,11 @@ static const bf BF_INVLN2 = { 0, 0, { 0xEB577AA8DD695A58ull, 0xBE87FED0691D3E88u
 static bf bf_div(const bf *a, const bf *b)
 {
     bf x, t;
-    u128 q = ((u128)1 << 127) / b->m[2];
+    uint64_t rem;
+    /* initial 64-bit reciprocal estimate: 2^127 / top limb */
     x.sign = b->sign;
     x.exp = -b->exp - 1;
-    x.m[2] = (q >> 64) ? ~0ull : (uint64_t)q;
+    x.m[2] = b->m[2] == 0x8000000000000000ull ? ~0ull : div128(0x8000000000000000ull, 0, b->m[2], &rem);
     x.m[1] = x.m[0] = 0;
     for (int i = 0; i < 3; i++) {
         t = bf_mul(b, &x);
@@ -245,9 +247,9 @@ static x87_f80 bf_round(fctx *c, const bf *a)
 static x87_f80 bf_finish(fctx *c, const bf *a)
 {
     x87_f80 r = bf_round(c, a);
-    c->ex |= PE;
+    c->flags |= PE;
     if (!(r.sexp & 0x7FFF) && (c->cw & UE))
-        c->ex |= UE;
+        c->flags |= UE;
     return r;
 }
 
@@ -349,7 +351,7 @@ static bf k_log2(const bf *x)
     t = bf_div(&n, &d);
     l = k_atanh2(&t);
     l = bf_mul(&l, &BF_INVLN2);
-    e = bf_from_u128(ex < 0 ? (u128)(-(int64_t)ex) : (u128)ex, 0, ex < 0);
+    e = bf_from_w(0, ex < 0 ? (uint64_t)(-(int64_t)ex) : (uint64_t)ex, 0, ex < 0);
     return bf_add(&e, &l);
 }
 
@@ -373,37 +375,39 @@ static bf k_expm1(const bf *z)
 /* ------------------------------------------------------------------ */
 
 /* Intel's 66-bit pi: 0xC90FDAA22168C234C * 2^-66 */
-#define PI66 ((((u128)0xC) << 64) | 0x90FDAA22168C234Cull)
+#define PI66_HI 0xCull
+#define PI66_LO 0x90FDAA22168C234Cull
 
 /* Reduce |x| modulo pi66/2 to [-pi/4, pi/4]; returns the quadrant. */
 static unsigned trig_reduce(const unp *a, bf *r)
 {
     int32_t e = a->exp - 16383;
-    u128 rem, p = PI66;
+    w128 rem, p = w_make(PI66_HI, PI66_LO);
     uint64_t q = 0;
-    int shift, neg = 0;
+    int neg = 0;
 
     if (e < -1) {
         *r = bf_from_unp(a);
         r->sign = 0;
         return 0;
     }
-    /* work in units of 2^-67, in which pi66/2 == PI66 */
-    rem = a->sig;
-    shift = e + 4;
-    while (shift > 0) {
-        int s = shift > 59 ? 59 : shift;
-        u128 t = rem << s;
-        q = (q << s) + (uint64_t)(t / p);
-        rem = t % p;
-        shift -= s;
+    /* Exact long division in units of 2^-67, in which pi66/2 == PI66:
+     * |x| = sig << (e + 4).  Only the low bits of the quotient matter. */
+    rem = w_make(0, a->sig);
+    for (int i = e + 4; i > 0; i--) {
+        rem = w_shl(rem, 1);
+        q <<= 1;
+        if (w_cmp(rem, p) >= 0) {
+            rem = w_sub(rem, p);
+            q |= 1;
+        }
     }
-    if (rem > (p >> 1)) {
-        rem = p - rem;
+    if (w_cmp(rem, w_shr(p, 1)) > 0) {
+        rem = w_sub(p, rem);
         q++;
         neg = 1;
     }
-    *r = bf_from_u128(rem, -67, neg);
+    *r = bf_from_w(rem.hi, rem.lo, -67, neg);
     return (unsigned)(q & 3);
 }
 
@@ -426,6 +430,7 @@ static bf trig_eval(const unp *a, int which)
 static int trig_special(fctx *c, const unp *a, int *c2, x87_f80 *out)
 {
     *c2 = 0;
+    *out = F80(0, 0);
     if (a->kind >= K_QNAN) {
         *out = x87i_nan1(c, a);
         return 1;
@@ -435,7 +440,7 @@ static int trig_special(fctx *c, const unp *a, int *c2, x87_f80 *out)
         return 1;
     }
     if (a->kind == K_DEN)
-        c->ex |= DE;
+        c->flags |= DE;
     if (a->kind != K_ZERO && a->exp >= 16383 + 63) {
         *c2 = 1;
         return 1;
@@ -448,9 +453,9 @@ static int trig_special(fctx *c, const unp *a, int *c2, x87_f80 *out)
 static x87_f80 tiny_identity(fctx *c, const unp *a)
 {
     x87_f80 r = x87i_round_pack_prec(c, a->sign, a->exp, a->sig, 0, 64);
-    c->ex |= PE;
+    c->flags |= PE;
     if (a->exp <= 0 && (c->cw & UE))
-        c->ex |= UE;
+        c->flags |= UE;
     return r;
 }
 
@@ -458,7 +463,7 @@ static x87_f80 tiny_identity(fctx *c, const unp *a)
 #define TAN_TINY_EXP (16383 - 34)
 #define ATAN_TINY_EXP (-41)
 
-x87_f80 x87i_fsin(fctx *c, const unp *a, int *c2)
+X87_INTERNAL x87_f80 x87i_fsin(fctx *c, const unp *a, int *c2)
 {
     x87_f80 r;
     bf v;
@@ -473,7 +478,7 @@ x87_f80 x87i_fsin(fctx *c, const unp *a, int *c2)
     return r;
 }
 
-x87_f80 x87i_fcos(fctx *c, const unp *a, int *c2)
+X87_INTERNAL x87_f80 x87i_fcos(fctx *c, const unp *a, int *c2)
 {
     x87_f80 r;
     bf v;
@@ -482,7 +487,7 @@ x87_f80 x87i_fcos(fctx *c, const unp *a, int *c2)
     if (a->kind == K_ZERO)
         return F80(0x3FFF, 0x8000000000000000ull);
     if (a->exp <= SIN_TINY_EXP) {
-        c->ex |= PE;
+        c->flags |= PE;
         return F80(0x3FFF, 0x8000000000000000ull);
     }
     v = trig_eval(a, 1);
@@ -490,7 +495,7 @@ x87_f80 x87i_fcos(fctx *c, const unp *a, int *c2)
     return r;
 }
 
-void x87i_fsincos(fctx *c, const unp *a, x87_f80 *s, x87_f80 *co, int *c2)
+X87_INTERNAL void x87i_fsincos(fctx *c, const unp *a, x87_f80 *s, x87_f80 *co, int *c2)
 {
     bf v;
     if (trig_special(c, a, c2, s)) {
@@ -511,10 +516,10 @@ void x87i_fsincos(fctx *c, const unp *a, x87_f80 *s, x87_f80 *co, int *c2)
     *s = bf_round(c, &v);
     v = trig_eval(a, 1);
     *co = bf_round(c, &v);
-    c->ex |= PE;
+    c->flags |= PE;
 }
 
-x87_f80 x87i_fptan(fctx *c, const unp *a, int *c2)
+X87_INTERNAL x87_f80 x87i_fptan(fctx *c, const unp *a, int *c2)
 {
     x87_f80 r;
     bf rr, s, co, v;
@@ -552,7 +557,7 @@ static x87_f80 round_signed(fctx *c, bf v, int sign)
     return r;
 }
 
-x87_f80 x87i_fpatan(fctx *c, const unp *y, const unp *x)
+X87_INTERNAL x87_f80 x87i_fpatan(fctx *c, const unp *y, const unp *x)
 {
     bf by, bx, z, t;
     int swap;
@@ -560,7 +565,7 @@ x87_f80 x87i_fpatan(fctx *c, const unp *y, const unp *x)
     if (x->kind >= K_QNAN || y->kind >= K_QNAN)
         return x87i_nan2(c, x, y);
     if (x->kind == K_DEN || y->kind == K_DEN)
-        c->ex |= DE;
+        c->flags |= DE;
     if (y->kind == K_ZERO) {
         if (!x->sign)
             return F80(y->sign << 15, 0);
@@ -602,7 +607,7 @@ x87_f80 x87i_fpatan(fctx *c, const unp *y, const unp *x)
 /* F2XM1, FYL2X, FYL2XP1                                               */
 /* ------------------------------------------------------------------ */
 
-x87_f80 x87i_f2xm1(fctx *c, const unp *a)
+X87_INTERNAL x87_f80 x87i_f2xm1(fctx *c, const unp *a)
 {
     bf x, z, v;
     x87_f80 r;
@@ -613,10 +618,10 @@ x87_f80 x87i_f2xm1(fctx *c, const unp *a)
     if (a->kind == K_INF)
         return a->sign ? F80(0xBFFF, 0x8000000000000000ull) : F80(0x7FFF, 0x8000000000000000ull);
     if (a->kind == K_DEN)
-        c->ex |= DE;
+        c->flags |= DE;
     if (a->exp >= 16383) {
         /* |x| >= 1 */
-        c->ex |= PE;
+        c->flags |= PE;
         if (a->exp == 16383 && a->sig == 0x8000000000000000ull)
             return a->sign ? F80(0xBFFE, 0x8000000000000000ull) : F80(0x3FFF, 0x8000000000000000ull);
         return F80((a->sign << 15) | a->exp, a->sig); /* out of range: unchanged */
@@ -635,7 +640,7 @@ x87_f80 x87i_f2xm1(fctx *c, const unp *a)
 
 static x87_f80 inf_signed(int sign) { return F80((sign << 15) | 0x7FFF, 0x8000000000000000ull); }
 
-x87_f80 x87i_fyl2x(fctx *c, const unp *y, const unp *x)
+X87_INTERNAL x87_f80 x87i_fyl2x(fctx *c, const unp *y, const unp *x)
 {
     bf l, by, v;
     x87_f80 r;
@@ -646,13 +651,13 @@ x87_f80 x87i_fyl2x(fctx *c, const unp *y, const unp *x)
         if (y->kind == K_ZERO)
             return x87i_invalid(c);
         if (y->kind != K_INF)
-            c->ex |= ZE;
+            c->flags |= ZE;
         return inf_signed(!y->sign);
     }
     if (x->sign)
         return x87i_invalid(c);
     if (x->kind == K_DEN || y->kind == K_DEN)
-        c->ex |= DE;
+        c->flags |= DE;
     if (x->kind == K_INF) {
         if (y->kind == K_ZERO)
             return x87i_invalid(c);
@@ -672,7 +677,7 @@ x87_f80 x87i_fyl2x(fctx *c, const unp *y, const unp *x)
     if (x->sig == 0x8000000000000000ull && x->exp < 16383) {
         /* For x = 2^-n the hardware's logarithm comes out a hair above
          * the exact integer -n. */
-        bf eps = bf_from_u128(1, l.exp - 160, 0);
+        bf eps = bf_from_w(0, 1, l.exp - 160, 0);
         l = bf_add(&l, &eps);
     }
     /* Measured against real hardware: the logarithm is truncated to 67
@@ -684,7 +689,7 @@ x87_f80 x87i_fyl2x(fctx *c, const unp *y, const unp *x)
     return r;
 }
 
-x87_f80 x87i_fyl2xp1(fctx *c, const unp *y, const unp *x)
+X87_INTERNAL x87_f80 x87i_fyl2xp1(fctx *c, const unp *y, const unp *x)
 {
     bf bx, l, by, v;
     x87_f80 r;
@@ -692,7 +697,7 @@ x87_f80 x87i_fyl2xp1(fctx *c, const unp *y, const unp *x)
     if (x->kind >= K_QNAN || y->kind >= K_QNAN)
         return x87i_nan2(c, x, y);
     if (x->kind == K_DEN || y->kind == K_DEN)
-        c->ex |= DE;
+        c->flags |= DE;
     if (x->kind == K_ZERO) {
         if (y->kind == K_INF)
             return x87i_invalid(c);
@@ -717,7 +722,7 @@ x87_f80 x87i_fyl2xp1(fctx *c, const unp *y, const unp *x)
         bf s = bf_add(&BF_ONE, &bx);
         if (bf_is_zero(&s) || s.sign) {
             /* x <= -1: outside the domain; the hardware returns x */
-            c->ex |= PE;
+            c->flags |= PE;
             return F80((x->sign << 15) | x->exp, x->sig);
         }
         l = k_log2(&s);

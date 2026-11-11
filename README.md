@@ -19,9 +19,12 @@ the [MIT license](LICENSE), including the tests.
   unnormal / pseudo-NaN / pseudo-infinity encodings.
 * Transcendentals with Intel's 66-bit π argument reduction and a 192-bit
   internal kernel.
+* Two API levels: an instruction interpreter (`x87_exec`) and the
+  value-level operations it is built on (`x87_ops.h`) for binary translators
+  that track the register stack themselves.
 * No allocation, no global state, no host floating point, no libc beyond
-  `<stdint.h>` / `<stddef.h>`. Needs a compiler with `unsigned __int128`
-  (GCC, Clang).
+  `<stdint.h>` / `<stddef.h>`. Uses `unsigned __int128` where the compiler
+  has it and portable 64-bit arithmetic otherwise (32-bit targets work).
 
 ### How faithful is it?
 
@@ -107,11 +110,60 @@ hands over the two opcode bytes and a pointer to the operand
 `#MF` (CR0.NE=1) or assert FERR# (`x87_pending()`), exactly as the hardware
 would — and `X87_R_UD` for invalid encodings. See [`include/x87.h`](include/x87.h).
 
+### Value-level API for lifters / recompilers
+
+If your translator already models the x87 stack and data movement, use the
+operations directly ([`include/x87_ops.h`](include/x87_ops.h)) — these are the
+very functions `x87_exec()` calls, so they carry the same hardware-verified
+behaviour:
+
+```c
+#include "x87_ops.h"
+
+x87_env e = { .cw = cw };                 /* rounding, precision, masks */
+x87_operand a = x87_operand_f80(st0);
+x87_operand b = x87_operand_f64(mem_bits);   /* FADD m64real */
+x87_f80 r = x87_add(&a, &b, &e);
+
+sw |= e.flags;                            /* IE..PE raised by the operation */
+if (!e.inhibit) {                         /* unmasked #I/#Z/#D: no result */
+    st0 = r;
+    /* C1 = e.c1 */
+}
+```
+
+* Every operation overwrites `flags`, `c1` and `inhibit`; only `cw` is input.
+  `inhibit` tells you an unmasked exception suppressed the result (leave the
+  destination alone, do not pop). Unmasked overflow/underflow results come
+  back bias-adjusted, as on hardware. No build flag is involved: pass a
+  constant `0x037F` and ignore the outputs if you do not model exceptions.
+* Operands are built with the constructor matching their source
+  (`x87_operand_f80/_f32/_f64/_int`), because arithmetic with a memory
+  operand is not the same as "convert, then operate" for denormals and
+  signalling NaNs.
+* Covered: add/sub/mul/div, sqrt, rndint, scale, prem/prem1, xtract, compare,
+  xam, loads and stores for f32/f64/i16/i32/i64/BCD, the constants, and all
+  transcendentals.
+* `src/x87_amalgam.c` builds everything as one translation unit with the
+  internals `static`; `make x87.bc` produces LLVM bitcode from it. Define
+  `X87_API` (e.g. `static inline __attribute__((always_inline))` when
+  including the amalgamation from your semantics file) to have the public
+  wrappers inlined into lifted code. The wrappers and their exception
+  resolution inline and fold; the rounding core (`x87i_add`, ...) is large
+  and stays an out-of-line call unless you force it via `X87_INTERNAL`.
+* The C signatures pass `x87_f80` (`{i64, i16}`) by value, which Clang lowers
+  differently per target ABI. A pass that emits calls by hand should call
+  small wrappers from its own C semantics file rather than these directly.
+* Define `X87_NO_INT128` to force the portable arithmetic; it is selected
+  automatically where `__int128` does not exist and is verified against the
+  CPU and the recorded vectors just like the default build.
+
 ### Building and testing
 
 ```sh
 make                # libx87.a
-make check          # portable: replay vectors recorded on the reference CPU
+make check          # portable: value-API test + replay of vectors recorded on the
+                    # reference CPU (also built without __int128)
 make check-host     # x86-64 only: differential test against *your* CPU
 tests/hostdiff -n 20000000 -s 42     # more cases, other seed
 tests/hostdiff -A                    # transcendental bit-exact report
@@ -143,9 +195,13 @@ reference.
 
 | | |
 |---|---|
-| `include/x87.h` | public API |
+| `include/x87.h` | interpreter API (state, `x87_exec`) |
+| `include/x87_ops.h` | value-level operations |
 | `src/x87_arith.c` | 80-bit arithmetic, rounding, conversions |
-| `src/x87_exec.c` | decoder, stack / tag / exception handling, state images |
-| `src/x87_trans.c` | transcendental instructions |
+| `src/x87_trans.c` | transcendental kernels |
+| `src/x87_ops.c` | public value-level operations, exception resolution |
+| `src/x87_exec.c` | decoder, stack / tag handling, state images |
+| `src/x87_amalgam.c` | single translation unit build |
+| `tests/ops_test.c` | portable test of the value-level API |
 | `tests/hostdiff.c` | differential tester against the host CPU |
 | `tests/replay.c`, `tests/vectors/` | portable replay of recorded hardware vectors |
