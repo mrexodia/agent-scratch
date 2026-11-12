@@ -216,3 +216,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# x87 build outputs
+*.o
+*.a
+tests/hostdiff
+tests/replay
+tests/replay-noint128
+tests/ops_test
+*.bc
+tests/x87trace
+tests/bench
+tests/workloads/libm_ld
+tests/workloads/fp387
+tests/workloads/signals
+tests/state_test
