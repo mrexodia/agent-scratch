@@ -229,3 +229,4 @@ tests/x87trace
 tests/bench
 tests/workloads/libm_ld
 tests/workloads/fp387
+tests/workloads/signals

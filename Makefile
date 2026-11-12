@@ -44,7 +44,11 @@ tests/workloads/libm_ld: tests/workloads/libm_ld.c
 tests/workloads/fp387: tests/workloads/fp387.c
 	$(CC) -O2 -mfpmath=387 -static -no-pie -w $< -o $@ -lm
 
-check-trace: tests/x87trace tests/workloads/fp387 tests/workloads/libm_ld
+tests/workloads/signals: tests/workloads/signals.c
+	$(CC) -O1 -static -no-pie -w $< -o $@
+
+check-trace: tests/x87trace tests/workloads/fp387 tests/workloads/libm_ld tests/workloads/signals
+	tests/x87trace -q tests/workloads/signals | grep ' 24 x87 instructions .* 0 mismatches'
 	tests/trace-qemu.sh $(TRACE_WORKDIR)
 	tests/x87trace -q tests/workloads/fp387
 	tests/x87trace -q -n 300000 tests/workloads/libm_ld 2
@@ -66,6 +70,6 @@ check-host: tests/hostdiff
 
 clean:
 	rm -f $(OBJ) libx87.a x87.bc tests/hostdiff tests/replay tests/replay-noint128 tests/ops_test \
-	      tests/x87trace tests/bench tests/workloads/libm_ld tests/workloads/fp387
+	      tests/x87trace tests/bench tests/workloads/libm_ld tests/workloads/fp387 tests/workloads/signals
 
 .PHONY: all check check-host check-trace bench clean

@@ -279,7 +279,7 @@ int main(int argc, char **argv)
     unsigned long total = 0, uniq = 0, hard = 0, soft = 0, steps = 0;
     long maxprint = 10;
     unsigned long limit = 0;
-    int a = 1, quiet = 0, status;
+    int a = 1, quiet = 0, status, pending_sig = 0;
     const char *extra_skip = 0;
     FILE *rec = 0;
 
@@ -330,6 +330,23 @@ int main(int argc, char **argv)
         if (limit && total >= limit) {
             kill(child, SIGKILL);
             break;
+        }
+        if (pending_sig) {
+            /*
+             * Deliver the signal the last step raised, still single-stepping:
+             * the tracee stops again at the first instruction of its handler
+             * (or dies), so code run in and after a handler stays traced.  No
+             * instruction of the program executes during this step.
+             */
+            int deliver = pending_sig;
+            pending_sig = 0;
+            if (ptrace(PTRACE_SINGLESTEP, child, 0, deliver) < 0)
+                break;
+            if (waitpid(child, &status, 0) < 0 || WIFEXITED(status) || WIFSIGNALED(status))
+                break;
+            if (WSTOPSIG(status) != SIGTRAP)
+                pending_sig = WSTOPSIG(status);
+            continue;
         }
         if (ptrace(PTRACE_GETREGS, child, 0, &r0) < 0)
             break;
@@ -471,13 +488,7 @@ int main(int argc, char **argv)
                 }
             }
         }
-        if (sig) {
-            /* deliver the signal the instruction raised */
-            if (ptrace(PTRACE_CONT, child, 0, sig) < 0)
-                break;
-            if (waitpid(child, &status, 0) < 0 || WIFEXITED(status) || WIFSIGNALED(status))
-                break;
-        }
+        pending_sig = sig;
     }
     if (rec)
         fclose(rec);

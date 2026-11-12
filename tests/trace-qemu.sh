@@ -21,6 +21,13 @@ for t in $tests; do
     # fprem iterates for a very long time: only sample its beginning
     limit=0
     [ "$t" = fprem ] && limit=12000
-    "$here/x87trace" -q -n $limit "$work/test-i386-$t" | tail -n 1 || status=1
+    # keep the tracer's own exit status: a pipeline would report tail's
+    if "$here/x87trace" -q -n $limit "$work/test-i386-$t" > "$work/$t.log" 2>&1; then
+        tail -n 1 "$work/$t.log"
+    else
+        cat "$work/$t.log"
+        echo "FAILED: test-i386-$t" >&2
+        status=1
+    fi
 done
 exit $status
