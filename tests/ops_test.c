@@ -102,6 +102,45 @@ int main(void)
     r = x87_sqrt(x87_from_int(2), &e);
     CHECK(same(r, 0x3FFF, 0xB504F333F9DE6484ull) && e.flags == X87_SW_PE);
 
+    /*
+     * Places where the SDM text or Intel's formal model differs from what the
+     * reference CPU does.  The library follows the CPU (each case was probed
+     * on hardware); these pin that down.
+     */
+    /* FST m32 of an exactly representable float denormal with #U unmasked:
+     * underflow is still signalled and nothing is stored */
+    e.cw = 0x036F;
+    (void)x87_to_f32(f80(0x3FFF - 130, 0x8000000000000000ull), &e);
+    CHECK(e.flags == X87_SW_UE && e.inhibit);
+    e.cw = 0x037F;
+    CHECK(x87_to_f32(f80(0x3FFF - 130, 0x8000000000000000ull), &e) == 0x00080000u && e.flags == 0);
+    /* tininess is detected after rounding: just below the smallest normal
+     * float rounds up to it without #U */
+    CHECK(x87_to_f32(f80(0x3FFF - 127, 0xFFFFFFFFFFFFFFFFull), &e) == 0x00800000u && e.flags == X87_SW_PE && e.c1 == 1);
+    CHECK(x87_to_f64(f80(0x3FFF - 1023, 0xFFFFFFFFFFFFFFFFull), &e) == 0x0010000000000000ull && e.flags == X87_SW_PE);
+    /* FIST of a denormal does not raise #D */
+    CHECK(x87_to_int(f80(0, 0x1000), 32, 0, &e) == 0 && e.flags == X87_SW_PE);
+    /* FSCALE of a denormal by zero returns it unchanged, even with #U unmasked */
+    e.cw = 0x036F;
+    r = x87_scale(f80(0, 0x1000), f80(0, 0), &e);
+    CHECK(same(r, 0, 0x1000) && e.flags == X87_SW_DE && !e.inhibit);
+    /* FPATAN(+inf, -inf) = 3pi/4 follows the rounding mode */
+    e.cw = 0x037F;
+    r = x87_atan2(f80(0x7FFF, 0x8000000000000000ull), f80(0xFFFF, 0x8000000000000000ull), &e);
+    CHECK(same(r, 0x4000, 0x96CBE3F9990E91A8ull) && e.c1 == 1);
+    e.cw = 0x0F7F;
+    r = x87_atan2(f80(0x7FFF, 0x8000000000000000ull), f80(0xFFFF, 0x8000000000000000ull), &e);
+    CHECK(same(r, 0x4000, 0x96CBE3F9990E91A7ull) && e.c1 == 0);
+    /* a compare with an unmasked #IA still reports "unordered" */
+    e.cw = 0x037E;
+    a = x87_operand_f80(one); b = x87_operand_f80(f80(0x7FFF, 0xC000000000000000ull));
+    CHECK(x87_cmp(&a, &b, 0, &e) == X87_CMP_UN && e.flags == X87_SW_IE && e.inhibit);
+    /* a denormal divided by zero raises only #Z */
+    e.cw = 0x037F;
+    a = x87_operand_f80(f80(0, 0x1000)); b = x87_operand_int(0);
+    (void)x87_div(&a, &b, &e);
+    CHECK(e.flags == X87_SW_ZE);
+
     printf("ops_test: %s\n", fails ? "FAILED" : "ok");
     return fails != 0;
 }

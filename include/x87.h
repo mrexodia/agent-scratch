@@ -94,8 +94,13 @@ X87_API uint16_t x87_tag_word(const x87_state *s);
 X87_API void x87_fxsave(const x87_state *s, uint8_t *area, int rex_w);
 X87_API void x87_fxrstor(x87_state *s, const uint8_t *area, int rex_w);
 
-/* MMX support: register access aliasing as done by MMX instructions. */
-X87_API uint64_t x87_mmx_read(const x87_state *s, int reg);
+/* MMX support: the MMX registers alias the significands of the physical
+ * x87 registers.  Any MMX instruction except EMMS - reads included - sets
+ * TOP to 0 and marks all registers valid; a write also sets the exponent
+ * and sign bits of the register to all ones.  Like the x87 instructions,
+ * MMX instructions (EMMS too) raise #MF first if an unmasked x87 exception
+ * is pending: check x87_pending() before calling these. */
+X87_API uint64_t x87_mmx_read(x87_state *s, int reg);
 X87_API void x87_mmx_write(x87_state *s, int reg, uint64_t value);
 X87_API void x87_emms(x87_state *s);
 

@@ -208,6 +208,7 @@ static void load_env(x87_state *s, const uint8_t *p, int fmt)
         s->fcs = rd16(p + 8);
         s->fdp = rd16(p + 10);
         s->fds = rd16(p + 12);
+        s->fop = 0; /* this layout has no opcode field */
         set_cw(s, rd16(p));
         break;
     case X87_ENV_RM32:
@@ -280,13 +281,24 @@ X87_API void x87_fxrstor(x87_state *s, const uint8_t *a, int rex_w)
     set_cw(s, rd16(a));
 }
 
-X87_API uint64_t x87_mmx_read(const x87_state *s, int reg) { return s->r[reg & 7].mant; }
+/* Every MMX instruction except EMMS, reads included, sets TOP to 0 and
+ * marks all eight registers valid. */
+static void mmx_enter(x87_state *s)
+{
+    s->valid = 0xFF;
+    set_top(s, 0);
+}
+
+X87_API uint64_t x87_mmx_read(x87_state *s, int reg)
+{
+    mmx_enter(s);
+    return s->r[reg & 7].mant;
+}
 
 X87_API void x87_mmx_write(x87_state *s, int reg, uint64_t value)
 {
     s->r[reg & 7] = F80(0xFFFF, value);
-    s->valid = 0xFF;
-    set_top(s, 0);
+    mmx_enter(s);
 }
 
 X87_API void x87_emms(x87_state *s) { s->valid = 0; }
