@@ -51,7 +51,7 @@ tests/workloads/signals: tests/workloads/signals.c
 	$(CC) -O1 -static -no-pie -w $< -o $@
 
 check-trace: tests/x87trace tests/workloads/fp387 tests/workloads/libm_ld tests/workloads/signals
-	tests/x87trace -q tests/workloads/signals | grep ' 24 x87 instructions .* 0 mismatches'
+	tests/x87trace -q tests/workloads/signals | grep ' 31 x87 instructions .* 0 mismatches'
 	tests/trace-qemu.sh $(TRACE_WORKDIR)
 	tests/x87trace -q tests/workloads/fp387
 	tests/x87trace -q -n 300000 tests/workloads/libm_ld 2

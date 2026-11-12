@@ -54,6 +54,26 @@ static int peek(uint64_t addr, uint8_t *buf, size_t n)
     return 0;
 }
 
+/*
+ * The signal a stop has to deliver to the program, or 0 if the stop is only
+ * the completion of our own single step.  A SIGTRAP the program raised
+ * itself (raise, kill, an INT3 of its own) is told apart from a trace trap
+ * by its siginfo code.
+ */
+static int stop_signal(int status)
+{
+    siginfo_t si;
+    int sig = WSTOPSIG(status);
+    if (sig != SIGTRAP)
+        return sig;
+    /* Trace traps carry a TRAP_* code (TRAP_TRACE; TRAP_BRKPT for a step over
+     * a system call).  A signal sent with raise()/kill() has a code <= 0, and
+     * an INT3 executed by the program reports SI_KERNEL. */
+    if (ptrace(PTRACE_GETSIGINFO, child, 0, &si) == 0 && (si.si_code <= 0 || si.si_code == SI_KERNEL))
+        return SIGTRAP;
+    return 0;
+}
+
 static void poke8(uint64_t addr, uint8_t v)
 {
     long w = ptrace(PTRACE_PEEKTEXT, child, (void *)addr, 0);
@@ -79,7 +99,7 @@ static int run_to(uint64_t addr)
         ptrace(PTRACE_GETREGS, child, 0, &r);
         if (WSTOPSIG(status) == SIGTRAP && r.rip == addr + 1)
             break;
-        sig = WSTOPSIG(status) == SIGTRAP ? 0 : WSTOPSIG(status);
+        sig = WSTOPSIG(status); /* not our breakpoint: the program's own signal */
     }
     poke8(addr, orig);
     r.rip = addr;
@@ -360,8 +380,7 @@ int main(int argc, char **argv)
                 break;
             if (waitpid(child, &status, 0) < 0 || WIFEXITED(status) || WIFSIGNALED(status))
                 break;
-            if (WSTOPSIG(status) != SIGTRAP)
-                pending_sig = WSTOPSIG(status);
+            pending_sig = stop_signal(status);
             continue;
         }
         if (ptrace(PTRACE_GETREGS, child, 0, &r0) < 0)
@@ -396,8 +415,7 @@ int main(int argc, char **argv)
         if (waitpid(child, &status, 0) < 0 || WIFEXITED(status) || WIFSIGNALED(status))
             break;
         steps++;
-        if (WSTOPSIG(status) != SIGTRAP)
-            sig = WSTOPSIG(status);
+        sig = stop_signal(status);
 
         if (is_x87 && sig != SIGSEGV && sig != SIGBUS) {
             x87_state s;
