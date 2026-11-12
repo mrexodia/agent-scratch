@@ -252,9 +252,18 @@ static void to_fnsave(const uint8_t *fx, uint8_t *img)
     memset(img + 12, 0, 16);
 }
 
-/* small open-addressing set of 64-bit hashes for de-duplication */
+/*
+ * Small open-addressing set of 64-bit hashes for de-duplication.  It never
+ * fills up: once three quarters of the slots are used it is emptied, so
+ * probing always terminates.  After that happens the "distinct cases" count
+ * (and a -G recording) may include repeats of cases seen before the reset.
+ */
+#ifndef SET_SIZE
 #define SET_SIZE (1u << 22)
+#endif
 static uint64_t *seen;
+static uint32_t seen_used;
+static unsigned long seen_resets;
 static int seen_add(uint64_t h)
 {
     uint32_t i = (uint32_t)(h >> 20) & (SET_SIZE - 1);
@@ -263,7 +272,14 @@ static int seen_add(uint64_t h)
         if (seen[i] == h) return 0;
         i = (i + 1) & (SET_SIZE - 1);
     }
+    if (seen_used >= SET_SIZE / 4 * 3) {
+        memset(seen, 0, (size_t)SET_SIZE * sizeof *seen);
+        seen_used = 0;
+        seen_resets++;
+        i = (uint32_t)(h >> 20) & (SET_SIZE - 1);
+    }
     seen[i] = h;
+    seen_used++;
     return 1;
 }
 static uint64_t fnv(uint64_t h, const void *p, size_t n)
@@ -505,9 +521,9 @@ int main(int argc, char **argv)
         for (int o = 0; o < 8; o++)
             for (int m = 0; m < 256; m++)
                 if (runs[o][m]) kinds++;
-        printf("%s: %lu steps, %lu x87 instructions (%lu distinct cases, %d encodings): %lu mismatches, "
+        printf("%s: %lu steps, %lu x87 instructions (%s%lu distinct cases, %d encodings): %lu mismatches, "
                "%lu transcendental value-only differences\n",
-               argv[a], steps, total, uniq, kinds, hard, soft);
+               argv[a], steps, total, seen_resets ? "at most " : "", uniq, kinds, hard, soft);
     }
     return hard != 0;
 }
