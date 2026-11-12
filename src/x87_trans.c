@@ -587,8 +587,18 @@ X87_INTERNAL x87_f80 x87i_fptan(fctx *c, const unp *a, int *c2)
         return r;
     if (a->kind == K_ZERO)
         return F80(a->sign << 15, 0);
-    if (a->exp <= TAN_TINY_EXP)
+    if (a->exp <= SIN_TINY_EXP)
         return tiny_identity(c, a);
+    if (a->exp <= TAN_TINY_EXP) {
+        /* Between 2^-69 and 2^-33 the hardware's tangent is its sine
+         * (x minus a little) over a cosine of exactly 1: the result
+         * rounds as a value just below |x|, although tan(x) > x. */
+        bf eps;
+        v = bf_from_unp(a);
+        eps = bf_from_w(0, 1, v.exp - 160, v.sign);
+        v = bf_sub(&v, &eps);
+        return bf_finish(c, &v);
+    }
     n = trig_reduce(a, &rr);
     s = k_sin(&rr);
     co = k_cos(&rr);

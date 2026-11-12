@@ -408,6 +408,26 @@ static unsigned long test_fxsave(long count)
     return bad;
 }
 
+/* The results are specific to the CPU model: say which one this is. */
+static void print_host_cpu(void)
+{
+    unsigned a, b, c, d, r[12];
+    char brand[49];
+    __asm__("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+    {
+        unsigned fam = (a >> 8) & 15, mod = (a >> 4) & 15;
+        if (fam == 6 || fam == 15) mod |= ((a >> 16) & 15) << 4;
+        if (fam == 15) fam += (a >> 20) & 255;
+        for (unsigned i = 0; i < 3; i++)
+            __asm__("cpuid" : "=a"(r[4 * i]), "=b"(r[4 * i + 1]), "=c"(r[4 * i + 2]), "=d"(r[4 * i + 3])
+                            : "a"(0x80000002u + i), "c"(0));
+        memcpy(brand, r, 48);
+        brand[48] = 0;
+        printf("host CPU: %s (family %u model %u stepping %u)\n", brand, fam, mod, a & 15);
+    }
+    (void)b; (void)c; (void)d;
+}
+
 int main(int argc, char **argv)
 {
     long count = 1000000, maxprint = 10, printed = 0;
@@ -434,6 +454,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-A")) accuracy = only_trans = 1;
         else { fprintf(stderr, "bad arg %s\n", argv[i]); return 2; }
     }
+    print_host_cpu();
     stub = mmap(0, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (stub == MAP_FAILED) { perror("mmap"); return 2; }
     memset(&sa, 0, sizeof sa);

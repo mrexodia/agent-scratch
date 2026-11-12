@@ -36,6 +36,13 @@ executes each one both on the host CPU and in the emulator, and compares the
 words, the memory operand, EFLAGS, AX, and whether `#MF` or `#UD` was raised.
 
 Reference CPU: Intel Xeon, family 6 model 207 (Emerald Rapids).
+`hostdiff` prints the CPU it is running on. Everything below is a statement
+about that reference CPU: other CPUs - AMD, older Intel, and anything that
+is itself emulating x87 (QEMU, Rosetta, some cloud sandboxes) - genuinely
+behave differently in places, and `hostdiff` will report those places as
+mismatches. For example the reference returns FSIN/FSINCOS of a tiny `x` as
+exactly `x` and `1.0` in every rounding mode, where a correctly rounding
+implementation gives `x - 1ulp` and `1 - 1ulp` when rounding down.
 
 | Instructions | Result |
 |---|---|
@@ -70,7 +77,8 @@ Hardware behaviours that were found by measurement and deviate from, or are
 not spelled out in, the SDM — all reproduced:
 
 * Transcendentals ignore precision control and always report `PE`.
-* FSIN/FCOS return `x` / `1.0` unchanged below 2^-68, FPTAN below 2^-33,
+* FSIN/FCOS return `x` / `1.0` unchanged below 2^-68; FPTAN below 2^-33
+  rounds as a value just *under* `x` (its sine over a cosine of exactly 1),
   and FPATAN returns the plain quotient y/x when it is below 2^-40 (x > 0),
   regardless of rounding mode; FSIN(π) etc. follow the 66-bit π exactly.
 * F2XM1 with |x| > 1 and FYL2XP1 with x ≤ -1 return the operand unchanged.
